@@ -1,0 +1,12 @@
+[package]
+name = "pbr"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+mlua = {version = "0.8.9", features=["luau", "send"]}
+perbase = "0.8.5"
+rust-htslib = "0.38"
