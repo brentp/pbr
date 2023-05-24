@@ -6,7 +6,7 @@ use perbase_lib::{
     position::pileup_position::PileupPosition,
     read_filter::ReadFilter,
 };
-use rust_htslib::bam::{self, pileup::Alignment, record::Cigar, record::Record, Read};
+use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
 use std::env;
 use std::path::PathBuf;
 
