@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 mlua = {version = "0.8.9", features=["luau", "send"]}
-perbase = "0.8.5"
+perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment"}
 rust-htslib = "0.38"
