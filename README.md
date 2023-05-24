@@ -1,24 +1,48 @@
 # pbr
 drunk on [perbase](https://github.com/sstadick/perbase) pileups and lua expressions.
 
-This should be able to:
+## Expression
 
-1. Exclude called sites with ≥5% N frequency (no call rate)
-2. Trim terminal ends of reads (15 bases 5' and 3')
-3. Exclude coverage at sites overlapping homopolymers (≥4bp in length) and fraguracy
-4. Exclude reads with ≥5% N’s on them
+The following attributes are available on the `read` object in lua expressions:
 
-We can do these as follows:
+```        
+mapping_quality
+flags # integer. must use bit32 lua module (builtin here) to do operations
+tid
+pos
+start
+stop
+# where in the current read is the pileup given by qpos with convenience of distance_from_[left/right]_end
+qpos
+distance_from_left_end 
+distance_from_right_end
+insert_size
+qname
+base_qualities # list of base_qualities
+bq # base_quality at current site
+sequence # read sequence
+cigar_string
+length # length of the read sequence
+```
 
-1. Remove columns where %N > 0. (post-processing)
-2. TBD
-3. Use exclude regions
-4. use lua expression: `string_count(read.sequence, 'N') < 0.05 * #read.sequence`
+An example expression could be:
+
+```lua
+-- high mapping-q             and read-Q       not within 10 bases of left end      or     right end 
+read.mapping_quality > 10 and read.bq > 20 and read.distance_from_left_end > 10 and read.distance_from_right_end > 10 \
+--  and  exclude read if unmapped, not primary, qc_fail, or duplicate. 
+    and bit32.band(read.flags, bit32.bor(4, 256, 512, 1024)) == 0 \
+--- and exclude read if it has more than 5% N's in the sequence
+    and string_count(read.sequence, 'N') < 0.05 * read.length
+```
 
 
 For now, this runs as:
 
 ```
- cargo run $bam "string_count(read.sequence, 'N') < 0.05 * #read.sequence and read.mapping_quality > 30"
+ cargo run $bam "return $expression"
 ```
-where the string argument is the lua expression (and yes, #read.sequence gives length of the read sequence) for filtering reads.
+where the $expression argument is the lua expression.
+
++ Note that we can use, e.g. `print(read.qname, read.flags); return $expression)` to help with debugging.
++ Note that the expression *must* contain 'return'
