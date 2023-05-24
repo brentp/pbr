@@ -195,12 +195,24 @@ fn main() -> Result<()> {
 
     // Run the processor
     let receiver = par_granges_runner.process()?;
+    println!("#chrom\tpos\tdepth\ta\tc\tg\tt\tn");
     // Pull the in-order results from the receiver channel
     receiver.into_iter().for_each(|p: PileupPosition| {
         // Note that the returned values are required to be `serde::Serialize`, so more fancy things
         // than just debug printing are doable.
         if p.depth > 0 {
-            println!("p:{:?}", p);
+            //p:PileupPosition { ref_seq: "chr2", pos: 196, ref_base: None, depth: 1, a: 1, c: 0, g: 0, t: 0, n: 0, ins: 0, del: 0, ref_skip: 0, fail: 1, near_max_depth: false }
+            println!(
+                "{chrom}\t{pos}\t{depth}\t{a}\t{c}\t{g}\t{t}\t{n}",
+                chrom = p.ref_seq,
+                pos = p.pos,
+                depth = p.depth,
+                a = p.a,
+                c = p.c,
+                g = p.g,
+                t = p.t,
+                n = p.n
+            );
         }
     });
 
