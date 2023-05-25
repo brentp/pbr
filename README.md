@@ -28,11 +28,13 @@ length # length of the read sequence
 An example expression could be:
 
 ```lua
--- high mapping-q             and read-Q       not within 10 bases of left end      or     right end 
-read.mapping_quality > 10 and read.bq > 20 and read.distance_from_left_end > 10 and read.distance_from_right_end > 10 \
+-- high mapping-q    and base-quality for this column 
+read.mapping_quality > 10 and read.bq > 20 \
+--  and  not within 10 bases of left end      or     right end 
+    and read.distance_from_left_end > 10 and read.distance_from_right_end > 10 \
 --  and  exclude read if unmapped, not primary, qc_fail, or duplicate. 
     and bit32.band(read.flags, bit32.bor(4, 256, 512, 1024)) == 0 \
---- and exclude read if it has more than 5% N's in the sequence
+--  and exclude read if it has more than 5% N's in the sequence
     and string_count(read.sequence, 'N') < 0.05 * read.length
 ```
 
