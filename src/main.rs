@@ -316,3 +316,53 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use mlua::Lua;
+
+    #[test]
+    fn test_pileup_position() -> mlua::Result<()> {
+        let pileup_position = PileupPosition {
+            depth: 10,
+            a: 1,
+            c: 2,
+            g: 3,
+            t: 4,
+            n: 5,
+            fail: 6,
+            ins: 7,
+            del: 8,
+            ref_skip: 9,
+            pos: 10,
+            ..Default::default()
+        };
+
+        let lua = Lua::new();
+        let globals = lua.globals();
+        for (expected, expression) in [
+            (true, "pile.g > 3"),
+            (true, "pile.a > 0"),
+            (false, "pile.a > 10"),
+            (false, "pile.ref_skip == 100"),
+            (true, "pile.ref_skip == 9"),
+        ] {
+            eprintln!("Testing expression: {}", expression);
+            lua.scope(|scope| {
+                let p = scope
+                    .create_nonstatic_userdata(Pile(&pileup_position))
+                    .expect("error creating user data");
+                globals.set("pile", p)?;
+                let f = lua
+                    .load(&(String::from("return ") + expression))
+                    .into_function()?;
+                let result: bool = f.call(())?;
+                Ok(result == expected)
+            })
+            .expect("error evaluating expression");
+        }
+        Ok(())
+    }
+}
