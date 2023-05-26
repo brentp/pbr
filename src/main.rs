@@ -2,6 +2,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
+use clap::Parser;
+
 use mlua::prelude::*;
 use mlua::{Function, UserData};
 use perbase_lib::{
@@ -10,7 +12,6 @@ use perbase_lib::{
     read_filter::ReadFilter,
 };
 use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
-use std::env;
 use std::path::PathBuf;
 
 struct LuaReadFilter<'a> {
@@ -182,28 +183,42 @@ impl RegionProcessor for BasicProcessor {
     }
 }
 
-fn main() -> Result<()> {
-    let bam_path = env::args().nth(1).expect("bamfile");
-    let expression = env::args().nth(2).expect("lua expression");
+#[derive(Parser, Default, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(help = "Path to the bamfile")]
+    bam_path: PathBuf,
+    #[clap(help = "Lua expression to evaluate")]
+    expression: String,
+    #[clap(short, long, default_value = "2", help = "Number of threads to use")]
+    threads: usize,
+    #[clap(short, long, help = "Path to the BED file of include regions")]
+    bedfile: Option<PathBuf>,
+    #[clap(short, long, help = "optional Path to the reference fasta file")]
+    fasta: Option<PathBuf>,
+}
 
-    if !expression.contains("return") {
-        eprintln!("Expression '{}' must contain 'return'", expression);
+fn main() -> Result<()> {
+    let opts = Args::parse();
+
+    if !opts.expression.contains("return") {
+        eprintln!("Expression '{}' must contain 'return'", opts.expression);
         std::process::exit(1);
     }
 
     let basic_processor = BasicProcessor {
-        bamfile: PathBuf::from(&bam_path),
-        expression: String::from("") + expression.as_str(),
+        bamfile: PathBuf::from(&opts.bam_path),
+        expression: String::from("") + opts.expression.as_str(),
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
-        PathBuf::from(bam_path), // pass in bam
-        None,                    // optional ref fasta
-        None,                    // bedfile to narrow regions
-        None,                    // optional bcf/vcf file to specify positions of interest
-        true,                    // Merge any overlapping regions in the BED file
-        None,                    // optional allowed number of threads, defaults to max
-        None,                    // optional chunksize modification
+        PathBuf::from(opts.bam_path), // pass in bam
+        opts.fasta,                   // optional ref fasta
+        opts.bedfile,                 // bedfile to narrow regions
+        None,                         // optional bcf/vcf file to specify positions of interest
+        true,                         // Merge any overlapping regions in the BED file
+        Some(opts.threads),           // optional allowed number of threads, defaults to max
+        None,                         // optional chunksize modification
         None, // optional modifier on the size of the channel for sending Positions
         basic_processor,
     );
