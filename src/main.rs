@@ -1,6 +1,9 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use mlua::prelude::*;
-use mlua::UserData;
+use mlua::{Function, UserData};
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
@@ -10,9 +13,21 @@ use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
 use std::env;
 use std::path::PathBuf;
 
-struct LuaReadFilter {
-    expression: String,
-    lua: Lua,
+struct LuaReadFilter<'a> {
+    lua: &'a Lua,
+    filter_func: Function<'a>,
+}
+
+impl<'a> LuaReadFilter<'a> {
+    // Create a new LuaReadFilter instance with the given expression
+    fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
+        let filter_func = lua.load(expression).into_function()?;
+
+        Ok(Self {
+            lua: lua,
+            filter_func,
+        })
+    }
 }
 
 struct MyRecord<'a>(&'a Record, &'a Alignment<'a>);
@@ -84,33 +99,29 @@ impl<'a> UserData for MyRecord<'a> {
     }
 }
 
-// The actual implementation of `ReadFilter`
-impl ReadFilter for LuaReadFilter {
-    // Filter reads based SAM flags and mapping quality, true means pass
+impl<'a> ReadFilter for LuaReadFilter<'a> {
+    /// Filter reads based user expression.
     #[inline]
     fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
         let r = MyRecord(read, alignment.expect("always have alignment here"));
 
-        self.lua
-            .scope(|scope| {
-                let globals = self.lua.globals();
-                let r = scope
-                    .create_nonstatic_userdata(r)
-                    .expect("error creating user data");
-                globals.set("read", r).expect("error setting read");
+        let r = self.lua.scope(|scope| {
+            let globals = self.lua.globals();
+            let r = scope
+                .create_nonstatic_userdata(r)
+                .expect("error creating user data");
+            globals.set("read", r).expect("error setting read");
 
-                let result: bool = self
-                    .lua
-                    // TODO: compile once, eval many
-                    .load(self.expression.as_str())
-                    .set_name("filter_read")
-                    .expect("error setting chunk")
-                    .eval()
-                    .expect("error getting result");
+            self.filter_func.call::<_, bool>(())
+        });
 
-                Ok(result)
-            })
-            .unwrap_or(false)
+        match r {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error evaluating expression: {}", e);
+                false
+            }
+        }
     }
 }
 
@@ -128,11 +139,15 @@ impl RegionProcessor for BasicProcessor {
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
         let header = reader.header().to_owned();
+        let lua = Lua::new();
 
-        let rf = LuaReadFilter {
-            lua: Lua::new(),
-            expression: self.expression.to_string(),
-        };
+        let rf = LuaReadFilter::new(&self.expression, &lua).expect(
+            format!(
+                "error creating lua read filter with expression {}",
+                &self.expression
+            )
+            .as_str(),
+        );
 
         let string_count = rf
             .lua

@@ -7,6 +7,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
+mimalloc = "0.1.37"
 mlua = {version = "0.8.9", features=["luau", "send"]}
 perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment"}
 rust-htslib = {version="0.38", features=["static"]}
+
+[profile.release]
+#codegen-units=1
