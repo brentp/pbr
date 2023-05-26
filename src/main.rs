@@ -197,13 +197,13 @@ struct Args {
     #[clap(
         short,
         long,
-        default_value = "100_000",
-        help = "Number of threads to use"
+        default_value_t = 100000,
+        help = "maximum depth in the pileup"
     )]
     max_depth: u32,
     #[clap(short, long, help = "maximum depth in the pileup")]
     bedfile: Option<PathBuf>,
-    #[clap(short, long, help = "optional Path to the reference fasta file")]
+    #[clap(short, long, help = "optional path to the reference fasta file")]
     fasta: Option<PathBuf>,
 }
 
