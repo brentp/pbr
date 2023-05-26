@@ -47,4 +47,41 @@ For now, this runs as:
 where the $expression argument is the lua expression.
 
 + Note that we can use, e.g. `print(read.qname, read.flags); return $expression)` to help with debugging.
-+ Note that the expression *must* contain 'return'
++ Note that the expression *must* contain **'return'**
+
+
+# Usage
+
+```
+pileups filtered with lua expressions
+
+Usage: pbr [OPTIONS] <BAM_PATH> <EXPRESSION>
+
+Arguments:
+  <BAM_PATH>    Path to the bamfile
+  <EXPRESSION>  Lua expression to evaluate
+
+Options:
+  -t, --threads <THREADS>                  Number of threads to use [default: 2]
+  -m, --max-depth <MAX_DEPTH>              maximum depth in the pileup [default: 100000]
+  -b, --bedfile <BEDFILE>                  optional path to the BED of include regions
+  -f, --fasta <FASTA>                      optional path to the reference fasta file
+  -e, --exclude <EXCLUDE>                  optional path to BED of exclude regions
+  -p, --pile-expression <PILE_EXPRESSION>  optional expression required for the pileup
+  -h, --help                               Print help
+  -V, --version                            Print version
+```
+
+## PileExpression
+
+Note that the pile-expression is also a lua expression; it is applied to the Pileup (column) rather than to the reads.
+The available attributes on the `pile` object are:
+```
+depth,a,c,g,t,n,fail,ins,del,ref_skip
+```
+
+An example --pile-expression would look like:
+```
+return pile.n / pile.depth < 0.05
+```
+To require that fewer than 5% of the reads in the pile are 'N'. Positions that do not pass this expression will **not** be printed.

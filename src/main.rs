@@ -35,8 +35,24 @@ impl<'a> LuaReadFilter<'a> {
     }
 }
 
-struct MyRecord<'a>(&'a Record, &'a Alignment<'a>);
+struct Pile<'a>(&'a PileupPosition);
+impl<'a> UserData for Pile<'a> {
+    fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
+        fields.add_field_method_get("depth", |_, this| Ok(this.0.depth));
+        fields.add_field_method_get("a", |_, this| Ok(this.0.a));
+        fields.add_field_method_get("c", |_, this| Ok(this.0.c));
+        fields.add_field_method_get("g", |_, this| Ok(this.0.g));
+        fields.add_field_method_get("t", |_, this| Ok(this.0.t));
+        fields.add_field_method_get("n", |_, this| Ok(this.0.n));
+        fields.add_field_method_get("fail", |_, this| Ok(this.0.fail));
+        fields.add_field_method_get("ins", |_, this| Ok(this.0.ins));
+        fields.add_field_method_get("del", |_, this| Ok(this.0.del));
+        fields.add_field_method_get("ref_skip", |_, this| Ok(this.0.ref_skip));
+        fields.add_field_method_get("pos", |_, this| Ok(this.0.pos));
+    }
+}
 
+struct MyRecord<'a>(&'a Record, &'a Alignment<'a>);
 impl<'a> UserData for MyRecord<'a> {
     fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
         fields.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
@@ -213,6 +229,9 @@ struct Args {
     fasta: Option<PathBuf>,
     #[clap(short, long, help = "optional path to BED of exclude regions")]
     exclude: Option<PathBuf>,
+
+    #[clap(short, long, help = "optional expression required for the pileup")]
+    pile_expression: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -242,14 +261,45 @@ fn main() -> Result<()> {
         basic_processor,
     );
 
+    let pile_lua = Lua::new();
+
+    let pile_expression: Option<Function> = if let Some(expression) = opts.pile_expression {
+        Some(pile_lua.load(expression.as_str()).into_function()?)
+    } else {
+        None
+    };
+
     // Run the processor
     let receiver = par_granges_runner.process()?;
     println!("#chrom\tpos\tdepth\ta\tc\tg\tt\tn");
     // Pull the in-order results from the receiver channel
-    receiver.into_iter().for_each(|p: PileupPosition| {
-        // Note that the returned values are required to be `serde::Serialize`, so more fancy things
-        // than just debug printing are doable.
-        if p.depth > 0 {
+    receiver
+        .into_iter()
+        .filter(|p| p.depth > 0)
+        // filter on the pile expression
+        .filter(|p| {
+            if let Some(pile_expression) = &pile_expression {
+                let r = pile_lua.scope(|scope| {
+                    let globals = pile_lua.globals();
+                    let p = scope
+                        .create_nonstatic_userdata(Pile(&p))
+                        .expect("error creating user data");
+                    globals.set("pile", p).expect("error setting pile");
+
+                    pile_expression.call::<_, bool>(())
+                });
+                match r {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error evaluating expression: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                true
+            }
+        })
+        .for_each(|p: PileupPosition| {
             //p:PileupPosition { ref_seq: "chr2", pos: 196, ref_base: None, depth: 1, a: 1, c: 0, g: 0, t: 0, n: 0, ins: 0, del: 0, ref_skip: 0, fail: 1, near_max_depth: false }
             println!(
                 "{chrom}\t{pos}\t{depth}\t{a}\t{c}\t{g}\t{t}\t{n}",
@@ -262,8 +312,7 @@ fn main() -> Result<()> {
                 t = p.t,
                 n = p.n
             );
-        }
-    });
+        });
 
     Ok(())
 }
