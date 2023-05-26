@@ -130,6 +130,7 @@ struct BasicProcessor {
     // An indexed bamfile to query for the region we were passed
     bamfile: PathBuf,
     expression: String,
+    max_depth: u32,
 }
 
 // Implementation of the `RegionProcessor` trait to process each region
@@ -166,8 +167,9 @@ impl RegionProcessor for BasicProcessor {
         // fetch the region
         reader.fetch((tid, start, stop)).expect("Fetched ROI");
         // Walk over pileups
-        let result: Vec<PileupPosition> = reader
-            .pileup()
+        let mut p = reader.pileup();
+        p.set_max_depth(self.max_depth);
+        let result: Vec<PileupPosition> = p
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
@@ -192,7 +194,14 @@ struct Args {
     expression: String,
     #[clap(short, long, default_value = "2", help = "Number of threads to use")]
     threads: usize,
-    #[clap(short, long, help = "Path to the BED file of include regions")]
+    #[clap(
+        short,
+        long,
+        default_value = "100_000",
+        help = "Number of threads to use"
+    )]
+    max_depth: u32,
+    #[clap(short, long, help = "maximum depth in the pileup")]
     bedfile: Option<PathBuf>,
     #[clap(short, long, help = "optional Path to the reference fasta file")]
     fasta: Option<PathBuf>,
@@ -209,6 +218,7 @@ fn main() -> Result<()> {
     let basic_processor = BasicProcessor {
         bamfile: PathBuf::from(&opts.bam_path),
         expression: String::from("") + opts.expression.as_str(),
+        max_depth: opts.max_depth,
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
