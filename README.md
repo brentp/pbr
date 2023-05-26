@@ -43,10 +43,10 @@ read.mapping_quality > 10 and read.bq > 20 \
     and string_count(read.sequence, 'N') < 0.05 * read.length
 ```
 
-For now, this runs as:
+this runs as:
 
 ```
- cargo run $bam "return $expression"
+pbr $bam "return $expression" > out.pileup
 ```
 
 where the $expression argument is the lua expression.
