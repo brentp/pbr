@@ -1,6 +1,10 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod processor;
+
+use processor::{excluded, BasicProcessor};
+
 use anyhow::Result;
 use clap::Parser;
 
@@ -126,14 +130,6 @@ impl<'a> ReadFilter for LuaReadFilter<'a> {
     }
 }
 
-struct BasicProcessor {
-    // An indexed bamfile to query for the region we were passed
-    bamfile: PathBuf,
-    expression: String,
-    max_depth: u32,
-}
-
-// Implementation of the `RegionProcessor` trait to process each region
 impl RegionProcessor for BasicProcessor {
     type P = PileupPosition;
 
@@ -150,6 +146,12 @@ impl RegionProcessor for BasicProcessor {
             )
             .as_str(),
         );
+
+        let exclude_intervals = if let Some(regions_bed) = &self.exclude_regions {
+            Some(Self::bed_to_intervals(&header, regions_bed, true).expect("BED file"))
+        } else {
+            None
+        };
 
         let string_count = rf
             .lua
@@ -174,7 +176,11 @@ impl RegionProcessor for BasicProcessor {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
                 // Since pileup will pull reads that overhang edges.
-                if pileup.pos() >= start && pileup.pos() < stop {
+                if pileup.pos() >= start
+                    && pileup.pos() < stop
+                    // and check if this position is excluded.
+                    && !excluded(&exclude_intervals, &pileup)
+                {
                     Some(PileupPosition::from_pileup(pileup, &header, &rf, None))
                 } else {
                     None
@@ -201,10 +207,12 @@ struct Args {
         help = "maximum depth in the pileup"
     )]
     max_depth: u32,
-    #[clap(short, long, help = "maximum depth in the pileup")]
+    #[clap(short, long, help = "optional path to the BED of include regions")]
     bedfile: Option<PathBuf>,
     #[clap(short, long, help = "optional path to the reference fasta file")]
     fasta: Option<PathBuf>,
+    #[clap(short, long, help = "optional path to BED of exclude regions")]
+    exclude: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -219,6 +227,7 @@ fn main() -> Result<()> {
         bamfile: PathBuf::from(&opts.bam_path),
         expression: String::from("") + opts.expression.as_str(),
         max_depth: opts.max_depth,
+        exclude_regions: opts.exclude,
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
