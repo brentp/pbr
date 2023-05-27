@@ -28,10 +28,7 @@ impl<'a> LuaReadFilter<'a> {
     fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
         let filter_func = lua.load(expression).into_function()?;
 
-        Ok(Self {
-            lua: lua,
-            filter_func,
-        })
+        Ok(Self { lua, filter_func })
     }
 }
 
@@ -94,7 +91,7 @@ impl<'a> UserData for MyRecord<'a> {
         });
         fields.add_field_method_get("bq", |_, this| {
             if let Some(qpos) = this.1.qpos() {
-                let qual = this.0.qual()[qpos as usize];
+                let qual = this.0.qual()[qpos];
                 Ok(qual as i32)
             } else {
                 //Err(mlua::Error::RuntimeError("qpos is None".to_string()))
@@ -155,19 +152,16 @@ impl RegionProcessor for BasicProcessor {
         let header = reader.header().to_owned();
         let lua = Lua::new();
 
-        let rf = LuaReadFilter::new(&self.expression, &lua).expect(
-            format!(
+        let rf = LuaReadFilter::new(&self.expression, &lua).unwrap_or_else(|_| {
+            panic!(
                 "error creating lua read filter with expression {}",
                 &self.expression
             )
-            .as_str(),
-        );
+        });
 
-        let exclude_intervals = if let Some(regions_bed) = &self.exclude_regions {
-            Some(Self::bed_to_intervals(&header, regions_bed, true).expect("BED file"))
-        } else {
-            None
-        };
+        let exclude_intervals = self.exclude_regions.as_ref().map(|regions_bed| {
+            Self::bed_to_intervals(&header, regions_bed, true).expect("BED file")
+        });
 
         let string_count = rf
             .lua
@@ -250,14 +244,14 @@ fn main() -> Result<()> {
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
-        PathBuf::from(opts.bam_path), // pass in bam
-        opts.fasta,                   // optional ref fasta
-        opts.bedfile,                 // bedfile to narrow regions
-        None,                         // optional bcf/vcf file to specify positions of interest
-        true,                         // Merge any overlapping regions in the BED file
-        Some(opts.threads),           // optional allowed number of threads, defaults to max
-        None,                         // optional chunksize modification
-        None, // optional modifier on the size of the channel for sending Positions
+        opts.bam_path,      // pass in bam
+        opts.fasta,         // optional ref fasta
+        opts.bedfile,       // bedfile to narrow regions
+        None,               // optional bcf/vcf file to specify positions of interest
+        true,               // Merge any overlapping regions in the BED file
+        Some(opts.threads), // optional allowed number of threads, defaults to max
+        None,               // optional chunksize modification
+        None,               // optional modifier on the size of the channel for sending Positions
         basic_processor,
     );
 
@@ -282,7 +276,7 @@ fn main() -> Result<()> {
                 let r = pile_lua.scope(|scope| {
                     let globals = pile_lua.globals();
                     let p = scope
-                        .create_nonstatic_userdata(Pile(&p))
+                        .create_nonstatic_userdata(Pile(p))
                         .expect("error creating user data");
                     globals.set("pile", p).expect("error setting pile");
 
