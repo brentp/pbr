@@ -63,8 +63,8 @@ pub(crate) fn excluded(exclude_intervals: &Option<Vec<Lapper<u32, ()>>>, p: &Pil
     match exclude_intervals {
         Some(ref intervals) => {
             let ivs = &intervals[p.tid() as usize];
-            let pos = p.pos() as u32;
-            ivs.count(pos as u32, pos as u32 + 1) > 0
+            let pos = p.pos();
+            ivs.count(pos, pos + 1) > 0
         }
         None => false,
     }
