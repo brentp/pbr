@@ -11,6 +11,7 @@ pub(crate) struct BasicProcessor {
     pub(crate) expression: String,
     pub(crate) max_depth: u32,
     pub(crate) exclude_regions: Option<PathBuf>,
+    pub(crate) mate_fix: bool,
 }
 
 impl BasicProcessor {
