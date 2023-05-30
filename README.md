@@ -71,6 +71,7 @@ Options:
   -b, --bedfile <BEDFILE>                  optional path to the BED of include regions
   -f, --fasta <FASTA>                      optional path to the reference fasta file
   -e, --exclude <EXCLUDE>                  optional path to BED of exclude regions
+      --mate-fix                           adjust depth to not double count overlapping mates
   -p, --pile-expression <PILE_EXPRESSION>  optional expression required for the pileup
   -h, --help                               Print help
   -V, --version                            Print version

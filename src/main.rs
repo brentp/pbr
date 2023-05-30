@@ -191,7 +191,13 @@ impl RegionProcessor for BasicProcessor {
                     // and check if this position is excluded.
                     && !excluded(&exclude_intervals, &pileup)
                 {
-                    Some(PileupPosition::from_pileup(pileup, &header, &rf, None))
+                    if self.mate_fix {
+                        Some(PileupPosition::from_pileup_mate_aware(
+                            pileup, &header, &rf, None,
+                        ))
+                    } else {
+                        Some(PileupPosition::from_pileup(pileup, &header, &rf, None))
+                    }
                 } else {
                     None
                 }
@@ -224,6 +230,9 @@ struct Args {
     #[clap(short, long, help = "optional path to BED of exclude regions")]
     exclude: Option<PathBuf>,
 
+    #[clap(long, help = "adjust depth to not double count overlapping mates")]
+    mate_fix: bool,
+
     #[clap(short, long, help = "optional expression required for the pileup")]
     pile_expression: Option<String>,
 }
@@ -241,6 +250,7 @@ fn main() -> Result<()> {
         expression: String::from("") + opts.expression.as_str(),
         max_depth: opts.max_depth,
         exclude_regions: opts.exclude,
+        mate_fix: opts.mate_fix,
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
