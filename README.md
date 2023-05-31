@@ -1,5 +1,5 @@
 # pbr
-
+[![Rust](https://github.com/brentp/pbr/actions/workflows/rust.yml/badge.svg)](https://github.com/brentp/pbr/actions/workflows/rust.yml)
 drunk on [perbase](https://github.com/sstadick/perbase) pileups and lua expressions.
 
 An example use is in calculating mutation rates. Variant callers have filters such as these
