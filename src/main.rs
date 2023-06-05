@@ -24,9 +24,9 @@ struct LuaReadFilter<'a> {
 }
 
 impl<'a> LuaReadFilter<'a> {
-    // Create a new LuaReadFilter instance with the given expression
-    fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
-        let filter_func = lua.load(expression).into_function()?;
+    // Create a new LuaReadFilter instance with the given input expression
+    fn new(input_expression: &str, lua: &'a Lua) -> Result<Self> {
+        let filter_func = lua.load(input_expression).into_function()?;
 
         Ok(Self { lua, filter_func })
     }
@@ -152,10 +152,10 @@ impl RegionProcessor for BasicProcessor {
         let header = reader.header().to_owned();
         let lua = Lua::new();
 
-        let rf = LuaReadFilter::new(&self.expression, &lua).unwrap_or_else(|_| {
+        let rf = LuaReadFilter::new(&self.input_expression, &lua).unwrap_or_else(|_| {
             panic!(
-                "error creating lua read filter with expression {}",
-                &self.expression
+                "error creating lua read filter with input expression {}",
+                &self.input_expression
             )
         });
 
@@ -212,8 +212,13 @@ impl RegionProcessor for BasicProcessor {
 struct Args {
     #[arg(help = "Path to the bamfile")]
     bam_path: PathBuf,
-    #[clap(help = "Lua expression to evaluate")]
-    expression: String,
+    #[clap(
+        short = 'e',
+        long,
+        default_value = "return 1",
+        help = "Lua expression to filter the bam records"
+    )]
+    input_expression: String,
     #[clap(short, long, default_value = "2", help = "Number of threads to use")]
     threads: usize,
     #[clap(
@@ -227,7 +232,7 @@ struct Args {
     bedfile: Option<PathBuf>,
     #[clap(short, long, help = "optional path to the reference fasta file")]
     fasta: Option<PathBuf>,
-    #[clap(short, long, help = "optional path to BED of exclude regions")]
+    #[clap(short = 'E', long, help = "optional path to BED of exclude regions")]
     exclude: Option<PathBuf>,
 
     #[clap(long, help = "adjust depth to not double count overlapping mates")]
@@ -240,14 +245,17 @@ struct Args {
 fn main() -> Result<()> {
     let opts = Args::parse();
 
-    if !opts.expression.contains("return") {
-        eprintln!("Expression '{}' must contain 'return'", opts.expression);
+    if !opts.input_expression.contains("return") {
+        eprintln!(
+            "Input expression '{}' must contain 'return'",
+            opts.input_expression
+        );
         std::process::exit(1);
     }
 
     let basic_processor = BasicProcessor {
         bamfile: PathBuf::from(&opts.bam_path),
-        expression: String::from("") + opts.expression.as_str(),
+        input_expression: String::from("") + opts.input_expression.as_str(),
         max_depth: opts.max_depth,
         exclude_regions: opts.exclude,
         mate_fix: opts.mate_fix,
@@ -280,7 +288,7 @@ fn main() -> Result<()> {
     receiver
         .into_iter()
         .filter(|p| p.depth > 0)
-        // filter on the pile expression
+        // filter on the pileup expression
         .filter(|p| {
             if let Some(pile_expression) = &pile_expression {
                 let r = pile_lua.scope(|scope| {
@@ -295,7 +303,7 @@ fn main() -> Result<()> {
                 match r {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("Error evaluating expression: {}", e);
+                        eprintln!("Error evaluating pileup expression: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -347,26 +355,26 @@ mod tests {
 
         let lua = Lua::new();
         let globals = lua.globals();
-        for (expected, expression) in [
+        for (expected, input_expression) in [
             (true, "pile.g > 3"),
             (true, "pile.a > 0"),
             (false, "pile.a > 10"),
             (false, "pile.ref_skip == 100"),
             (true, "pile.ref_skip == 9"),
         ] {
-            eprintln!("Testing expression: {}", expression);
+            eprintln!("Testing input expression: {}", input_expression);
             lua.scope(|scope| {
                 let p = scope
                     .create_nonstatic_userdata(Pile(&pileup_position))
                     .expect("error creating user data");
                 globals.set("pile", p)?;
                 let f = lua
-                    .load(&(String::from("return ") + expression))
+                    .load(&(String::from("return ") + input_expression))
                     .into_function()?;
                 let result: bool = f.call(())?;
                 Ok(result == expected)
             })
-            .expect("error evaluating expression");
+            .expect("error evaluating input expression");
         }
         Ok(())
     }

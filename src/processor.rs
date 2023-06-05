@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub(crate) struct BasicProcessor {
     // An indexed bamfile to query for the region we were passed
     pub(crate) bamfile: PathBuf,
-    pub(crate) expression: String,
+    pub(crate) input_expression: String,
     pub(crate) max_depth: u32,
     pub(crate) exclude_regions: Option<PathBuf>,
     pub(crate) mate_fix: bool,

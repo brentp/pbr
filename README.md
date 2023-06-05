@@ -6,6 +6,40 @@ An example use is in calculating mutation rates. Variant callers have filters su
 that affect the number of mutations called; we also want to scale the denominator in similar
 way so we can compare rates across samples.
 
+
+# Usage
+
+```
+pileups filtered with lua expressions
+
+Usage: pbr [OPTIONS] <BAM_PATH>
+
+Arguments:
+  <BAM_PATH>  Path to the bamfile
+
+Options:
+  -e, --input-expression <INPUT_EXPRESSION>
+          Lua expression to filter the bam records [default: "return 1"]
+  -t, --threads <THREADS>
+          Number of threads to use [default: 2]
+  -m, --max-depth <MAX_DEPTH>
+          maximum depth in the pileup [default: 100000]
+  -b, --bedfile <BEDFILE>
+          optional path to the BED of include regions
+  -f, --fasta <FASTA>
+          optional path to the reference fasta file
+  -E, --exclude <EXCLUDE>
+          optional path to BED of exclude regions
+      --mate-fix
+          adjust depth to not double count overlapping mates
+  -p, --pile-expression <PILE_EXPRESSION>
+          optional expression required for the pileup
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
+
 ## Expression
 
 The following attributes are available on the `read` object in lua expressions:
@@ -46,36 +80,13 @@ read.mapping_quality > 10 and read.bq > 20 \
 this runs as:
 
 ```
-pbr $bam "return $expression" > out.pileup
+pbr -e "return $expression" $bam > out.pileup
 ```
 
 where the $expression argument is the lua expression.
 
 - Note that we can use, e.g. `print(read.qname, read.flags); return $expression)` to help with debugging.
 - Note that the expression _must_ contain **'return'**
-
-# Usage
-
-```
-pileups filtered with lua expressions
-
-Usage: pbr [OPTIONS] <BAM_PATH> <EXPRESSION>
-
-Arguments:
-  <BAM_PATH>    Path to the bamfile
-  <EXPRESSION>  Lua expression to evaluate
-
-Options:
-  -t, --threads <THREADS>                  Number of threads to use [default: 2]
-  -m, --max-depth <MAX_DEPTH>              maximum depth in the pileup [default: 100000]
-  -b, --bedfile <BEDFILE>                  optional path to the BED of include regions
-  -f, --fasta <FASTA>                      optional path to the reference fasta file
-  -e, --exclude <EXCLUDE>                  optional path to BED of exclude regions
-      --mate-fix                           adjust depth to not double count overlapping mates
-  -p, --pile-expression <PILE_EXPRESSION>  optional expression required for the pileup
-  -h, --help                               Print help
-  -V, --version                            Print version
-```
 
 ## PileExpression
 
