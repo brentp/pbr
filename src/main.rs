@@ -56,7 +56,6 @@ impl<'a> UserData for MyRecord<'a> {
         fields.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
         fields.add_field_method_get("flags", |_, this| Ok(this.0.flags()));
         fields.add_field_method_get("tid", |_, this| Ok(this.0.tid()));
-        fields.add_field_method_get("pos", |_, this| Ok(this.0.pos()));
         fields.add_field_method_get("start", |_, this| Ok(this.0.pos()));
         fields.add_field_method_get("stop", |_, this| Ok(this.0.cigar().end_pos()));
         fields.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
