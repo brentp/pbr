@@ -1,12 +1,13 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod cached_faidx;
 mod processor;
 
-use processor::{excluded, BasicProcessor};
-
 use anyhow::Result;
+use cached_faidx::CachedFaidx;
 use clap::Parser;
+use processor::{excluded, BasicProcessor};
 
 use mlua::prelude::*;
 use mlua::{Function, UserData};
@@ -149,6 +150,13 @@ impl RegionProcessor for BasicProcessor {
     // This function receives an interval to examine.
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
+        let mut fai = if let Some(fasta) = &self.fasta_path {
+            reader.set_reference(fasta).expect("reference");
+            Some(CachedFaidx::new(fasta).expect("error reading fasta"))
+        } else {
+            None
+        };
+
         let header = reader.header().to_owned();
         let lua = Lua::new();
 
@@ -180,8 +188,9 @@ impl RegionProcessor for BasicProcessor {
         reader.fetch((tid, start, stop)).expect("Fetched ROI");
         // Walk over pileups
         let mut p = reader.pileup();
+        let chrom = unsafe { std::str::from_utf8_unchecked(header.target_names()[tid as usize]) };
         p.set_max_depth(self.max_depth);
-        let result: Vec<PileupPosition> = p
+        let mut result: Vec<PileupPosition> = p
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
@@ -203,6 +212,14 @@ impl RegionProcessor for BasicProcessor {
                 }
             })
             .collect();
+        if let Some(fai) = &mut fai {
+            result.iter_mut().for_each(|p| {
+                let s = fai
+                    .fetch_seq(chrom, p.pos as usize, (p.pos + 1) as usize)
+                    .expect("error extracting reference base");
+                p.ref_base = Some(s[0] as char);
+            });
+        }
         result
     }
 }
@@ -230,7 +247,11 @@ struct Args {
     #[clap(short, long, help = "optional path to BED of exclude regions")]
     exclude: Option<PathBuf>,
 
-    #[clap(long, help = "adjust depth to not double count overlapping mates")]
+    #[clap(
+        long,
+        help = "adjust depth to not double count overlapping mates",
+        long_help = "note that for now this is much slower than the default"
+    )]
     mate_fix: bool,
 
     #[clap(short, long, help = "optional expression required for the pileup")]
@@ -251,6 +272,7 @@ fn main() -> Result<()> {
         max_depth: opts.max_depth,
         exclude_regions: opts.exclude,
         mate_fix: opts.mate_fix,
+        fasta_path: opts.fasta.clone(),
     };
 
     let par_granges_runner = par_granges::ParGranges::new(
@@ -275,7 +297,7 @@ fn main() -> Result<()> {
 
     // Run the processor
     let receiver = par_granges_runner.process()?;
-    println!("#chrom\tpos\tref_base\tdepth\ta\tc\tg\tt\tn");
+    println!("#chrom\tpos0\tref_base\tdepth\ta\tc\tg\tt\tn");
     // Pull the in-order results from the receiver channel
     receiver
         .into_iter()
