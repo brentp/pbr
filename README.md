@@ -85,7 +85,7 @@ pbr -e "return $expression" $bam > out.pileup
 
 where the $expression argument is the lua expression.
 
-- Note that we can use, e.g. `print(read.qname, read.flags); return $expression)` to help with debugging.
+- Note that we can use, e.g. `print(read.qname, read.flags); return $expression` to help with debugging.
 - Note that the expression _must_ contain **'return'**
 
 ## PileExpression
