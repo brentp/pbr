@@ -42,6 +42,8 @@ impl CachedFaidx {
         self.cache.extend_from_slice(r);
         Ok(())
     }
+
+    #[allow(dead_code)]
     pub fn fetch_seq_string<N: AsRef<str> + std::cmp::PartialEq>(
         &mut self,
         chrom: N,

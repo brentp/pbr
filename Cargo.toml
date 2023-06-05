@@ -1,6 +1,6 @@
 [package]
 name = "pbr"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Brent Pedersen"]
 description = "pileups filtered with lua expressions"
@@ -12,7 +12,7 @@ anyhow = "1.0.71"
 bio = "1.1.0"
 clap = {version="4.3.0", features=["derive", "help"]}
 mimalloc = "0.1.37"
-mlua = {version = "0.8.9", features=["luau", "send"]}
+mlua = {git = "https://github.com/khvzak/mlua", features=["luau", "send", "parking_lot"]}
 perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment"}
 rust-htslib = {version="0.38", features=["static"]}
 rust-lapper = "1.1.0"

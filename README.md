@@ -1,6 +1,6 @@
 # pbr
 [![Rust](https://github.com/brentp/pbr/actions/workflows/rust.yml/badge.svg)](https://github.com/brentp/pbr/actions/workflows/rust.yml)
-drunk on [perbase](https://github.com/sstadick/perbase) pileups and lua expressions.
+drunk on [perbase](https://github.com/sstadick/perbase) pileups and [lua](https://github.com/khvzak/mlua/) expressions.
 
 An example use is in calculating mutation rates. Variant callers have filters such as these
 that affect the number of mutations called; we also want to scale the denominator in similar
@@ -14,7 +14,6 @@ The following attributes are available on the `read` object in lua expressions:
 mapping_quality
 flags # integer. must use bit32 lua module (builtin here) to do operations
 tid
-pos
 start
 stop
 # where in the current read is the pileup given by qpos with convenience of distance_from_[left/right]_end
