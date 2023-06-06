@@ -70,75 +70,7 @@ impl<'a> UserData for Pile<'a> {
 }
 
 struct MyRecord<'a>(&'a Record);
-impl<'a> UserData for MyRecord<'a> {
-    fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
-        fields.add_field_method_get("flags", |_, this| Ok(this.0.flags()));
-        fields.add_field_method_get("tid", |_, this| Ok(this.0.tid()));
-        fields.add_field_method_get("start", |_, this| Ok(this.0.pos()));
-        fields.add_field_method_get("stop", |_, this| Ok(this.0.cigar().end_pos()));
-        /*
-        fields.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
-        fields.add_field_method_get("distance_from_left_end", |_, this| {
-            Ok(match this.1.qpos() {
-                Some(qpos) => qpos as i32,
-                None => -1,
-            })
-        });
-        fields.add_field_method_get("distance_from_right_end", |_, this| {
-            if this.1.qpos().is_none() {
-                return Ok(-1);
-            }
-            let len = this.0.seq_len();
-            Ok((len - this.1.qpos().unwrap_or(0)) as i32)
-        });
-        */
-
-        // see:  https://github.com/rust-bio/rust-htslib/pull/393
-        //fields.add_field_method_get("strand", |_, this| {
-        //    Ok(String::from(this.0.strand().strand_symbol()))
-        //});
-        fields.add_field_method_get("length", |_, this| Ok(this.0.seq_len()));
-        fields.add_field_method_get("insert_size", |_, this| Ok(this.0.insert_size()));
-        fields.add_field_method_get("qname", |_, this| {
-            let q = this.0.qname();
-            Ok(std::str::from_utf8(q)
-                .unwrap_or("BAD_READ_NAME")
-                .to_string())
-        });
-        fields.add_field_method_get("base_qualities", |_, this| {
-            let quals = this.0.qual().to_owned();
-            Ok(quals)
-        });
-        /*
-        fields.add_field_method_get("bq", |_, this| {
-            if let Some(qpos) = this.1.qpos() {
-                let qual = this.0.qual()[qpos];
-                Ok(qual as i32)
-            } else {
-                //Err(mlua::Error::RuntimeError("qpos is None".to_string()))
-                Ok(-1)
-            }
-        });
-        */
-        fields.add_field_method_get("sequence", |_, this| {
-            let seq = this.0.seq();
-            Ok(String::from(unsafe {
-                std::str::from_utf8_unchecked(&seq.as_bytes())
-            }))
-        });
-        /*
-        fields.add_field_method_get("cigar", |_, this| {
-            let cigar = this.0.cigar();
-            Ok(cigar)
-        });
-        */
-        fields.add_field_method_get("cigar_string", |_, this| {
-            let cigar = this.0.cigar();
-            Ok(cigar.to_string())
-        });
-    }
-}
+impl<'a> UserData for MyRecord<'a> {}
 
 impl<'a> ReadFilter for LuaReadFilter<'a> {
     /// Filter reads based user expression.
