@@ -64,6 +64,9 @@ impl BasicProcessor {
 pub(crate) fn excluded(exclude_intervals: &Option<Vec<Lapper<u32, ()>>>, p: &Pileup) -> bool {
     match exclude_intervals {
         Some(ref intervals) => {
+            if p.tid() as usize >= intervals.len() {
+                return false;
+            }
             let ivs = &intervals[p.tid() as usize];
             let pos = p.pos();
             ivs.count(pos, pos + 1) > 0
