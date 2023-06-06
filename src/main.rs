@@ -28,6 +28,25 @@ impl<'a> LuaReadFilter<'a> {
     // Create a new LuaReadFilter instance with the given expression
     fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
         let filter_func = lua.load(expression).into_function()?;
+        lua.register_userdata_type::<MyRecord>(|reg| {
+            reg.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
+            reg.add_field_method_get("flags", |_, this| Ok(this.0.flags()));
+            reg.add_field_method_get("tid", |_, this| Ok(this.0.tid()));
+            reg.add_field_method_get("start", |_, this| Ok(this.0.pos()));
+            reg.add_field_method_get("stop", |_, this| Ok(this.0.cigar().end_pos()));
+            /*
+            p.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
+            p.add_field_method_get("bq", |_, this| {
+                if let Some(qpos) = this.1.qpos() {
+                    let qual = this.0.qual()[qpos];
+                    Ok(qual as i32)
+                } else {
+                    //Err(mlua::Error::RuntimeError("qpos is None".to_string()))
+                    Ok(-1)
+                }
+            });
+            */
+        })?;
 
         Ok(Self { lua, filter_func })
     }
@@ -50,7 +69,7 @@ impl<'a> UserData for Pile<'a> {
     }
 }
 
-struct MyRecord<'a>(&'a Record, &'a Alignment<'a>);
+struct MyRecord<'a>(&'a Record);
 impl<'a> UserData for MyRecord<'a> {
     fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
         fields.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
@@ -58,6 +77,7 @@ impl<'a> UserData for MyRecord<'a> {
         fields.add_field_method_get("tid", |_, this| Ok(this.0.tid()));
         fields.add_field_method_get("start", |_, this| Ok(this.0.pos()));
         fields.add_field_method_get("stop", |_, this| Ok(this.0.cigar().end_pos()));
+        /*
         fields.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
         fields.add_field_method_get("distance_from_left_end", |_, this| {
             Ok(match this.1.qpos() {
@@ -72,6 +92,7 @@ impl<'a> UserData for MyRecord<'a> {
             let len = this.0.seq_len();
             Ok((len - this.1.qpos().unwrap_or(0)) as i32)
         });
+        */
 
         // see:  https://github.com/rust-bio/rust-htslib/pull/393
         //fields.add_field_method_get("strand", |_, this| {
@@ -89,6 +110,7 @@ impl<'a> UserData for MyRecord<'a> {
             let quals = this.0.qual().to_owned();
             Ok(quals)
         });
+        /*
         fields.add_field_method_get("bq", |_, this| {
             if let Some(qpos) = this.1.qpos() {
                 let qual = this.0.qual()[qpos];
@@ -98,6 +120,7 @@ impl<'a> UserData for MyRecord<'a> {
                 Ok(-1)
             }
         });
+        */
         fields.add_field_method_get("sequence", |_, this| {
             let seq = this.0.seq();
             Ok(String::from(unsafe {
@@ -120,15 +143,13 @@ impl<'a> UserData for MyRecord<'a> {
 impl<'a> ReadFilter for LuaReadFilter<'a> {
     /// Filter reads based user expression.
     #[inline]
-    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
-        let r = MyRecord(read, alignment.expect("always have alignment here"));
-
+    fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
+        let rec = MyRecord(read);
         let r = self.lua.scope(|scope| {
             let globals = self.lua.globals();
-            let r = scope
-                .create_nonstatic_userdata(r)
-                .expect("error creating user data");
-            globals.set("read", r).expect("error setting read");
+            let ud = scope.create_userdata_ref(&rec)?;
+
+            globals.set("read", ud).expect("error setting read");
 
             self.filter_func.call::<_, bool>(())
         });
