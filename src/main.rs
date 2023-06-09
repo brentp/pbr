@@ -75,7 +75,7 @@ impl<'a> ReadFilter for LuaReadFilter<'a> {
     fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
         let r = self.lua.scope(|scope| {
             let globals = self.lua.globals();
-            let ud = scope.create_userdata_ref(read)?;
+            let ud = scope.create_any_userdata_ref(read)?;
 
             globals.set("read", ud).expect("error setting read");
 
