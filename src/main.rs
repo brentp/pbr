@@ -34,8 +34,17 @@ impl<'a> LuaReadFilter<'a> {
             reg.add_field_method_get("tid", |_, this| Ok(this.tid()));
             reg.add_field_method_get("start", |_, this| Ok(this.pos()));
             reg.add_field_method_get("stop", |_, this| Ok(this.cigar().end_pos()));
+            reg.add_function("qpos", |_, this: mlua::AnyUserData| {
+                let r: Result<usize, LuaError> = this.get_named_user_value("qpos");
+                r
+            });
+            reg.add_field_method_get("bq", |_, this| {
+                let qpos = ????;
+                let qual = this.qual()[qpos];
+                Ok(qual)
+            });
+
             /*
-            p.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
             p.add_field_method_get("bq", |_, this| {
                 if let Some(qpos) = this.1.qpos() {
                     let qual = this.0.qual()[qpos];
@@ -72,10 +81,11 @@ impl<'a> UserData for Pile<'a> {
 impl<'a> ReadFilter for LuaReadFilter<'a> {
     /// Filter reads based user expression.
     #[inline]
-    fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
+    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
         let r = self.lua.scope(|scope| {
             let globals = self.lua.globals();
             let ud = scope.create_any_userdata_ref(read)?;
+            ud.set_named_user_value("qpos", alignment.unwrap().qpos())?;
 
             globals.set("read", ud).expect("error setting read");
 
