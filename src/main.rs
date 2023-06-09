@@ -28,12 +28,12 @@ impl<'a> LuaReadFilter<'a> {
     // Create a new LuaReadFilter instance with the given expression
     fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
         let filter_func = lua.load(expression).into_function()?;
-        lua.register_userdata_type::<MyRecord>(|reg| {
-            reg.add_field_method_get("mapping_quality", |_, this| Ok(this.0.mapq()));
-            reg.add_field_method_get("flags", |_, this| Ok(this.0.flags()));
-            reg.add_field_method_get("tid", |_, this| Ok(this.0.tid()));
-            reg.add_field_method_get("start", |_, this| Ok(this.0.pos()));
-            reg.add_field_method_get("stop", |_, this| Ok(this.0.cigar().end_pos()));
+        lua.register_userdata_type::<Record>(|reg| {
+            reg.add_field_method_get("mapping_quality", |_, this| Ok(this.mapq()));
+            reg.add_field_method_get("flags", |_, this| Ok(this.flags()));
+            reg.add_field_method_get("tid", |_, this| Ok(this.tid()));
+            reg.add_field_method_get("start", |_, this| Ok(this.pos()));
+            reg.add_field_method_get("stop", |_, this| Ok(this.cigar().end_pos()));
             /*
             p.add_field_method_get("qpos", |_, this| Ok(this.1.qpos()));
             p.add_field_method_get("bq", |_, this| {
@@ -69,17 +69,13 @@ impl<'a> UserData for Pile<'a> {
     }
 }
 
-struct MyRecord<'a>(&'a Record);
-impl<'a> UserData for MyRecord<'a> {}
-
 impl<'a> ReadFilter for LuaReadFilter<'a> {
     /// Filter reads based user expression.
     #[inline]
     fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
-        let rec = MyRecord(read);
         let r = self.lua.scope(|scope| {
             let globals = self.lua.globals();
-            let ud = scope.create_userdata_ref(&rec)?;
+            let ud = scope.create_userdata_ref(read)?;
 
             globals.set("read", ud).expect("error setting read");
 
