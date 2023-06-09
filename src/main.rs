@@ -10,7 +10,7 @@ use clap::Parser;
 use processor::{excluded, BasicProcessor};
 
 use mlua::prelude::*;
-use mlua::{Function, UserData};
+use mlua::Function;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
@@ -34,48 +34,79 @@ impl<'a> LuaReadFilter<'a> {
             reg.add_field_method_get("tid", |_, this| Ok(this.tid()));
             reg.add_field_method_get("start", |_, this| Ok(this.pos()));
             reg.add_field_method_get("stop", |_, this| Ok(this.cigar().end_pos()));
+            reg.add_field_method_get("length", |_, this| Ok(this.seq_len()));
+            reg.add_field_method_get("insert_size", |_, this| Ok(this.insert_size()));
+            reg.add_field_method_get("qname", |_, this| {
+                let q = this.qname();
+                Ok(std::str::from_utf8(q).unwrap_or("").to_string())
+            });
+            reg.add_field_method_get("sequence", |_, this| {
+                let seq = this.seq();
+                Ok(std::str::from_utf8(&seq.as_bytes())
+                    .unwrap_or("")
+                    .to_string())
+            });
             reg.add_function("qpos", |_, this: mlua::AnyUserData| {
                 let r: Result<usize, LuaError> = this.get_named_user_value("qpos");
                 r
             });
-            reg.add_field_method_get("bq", |_, this| {
-                let qpos = ????;
-                let qual = this.qual()[qpos];
-                Ok(qual)
+            reg.add_field_function_get("bq", |_, this| {
+                let qpos: usize = match this.get_named_user_value("qpos") {
+                    Ok(qpos) => qpos,
+                    Err(_) => {
+                        return Ok(-1);
+                    }
+                };
+                let this = this.borrow::<Record>()?;
+                Ok(this.qual()[qpos] as i32)
             });
-
-            /*
-            p.add_field_method_get("bq", |_, this| {
-                if let Some(qpos) = this.1.qpos() {
-                    let qual = this.0.qual()[qpos];
-                    Ok(qual as i32)
+            reg.add_field_function_get("distance_from_5prime", |_, this| {
+                let qpos: usize = match this.get_named_user_value("qpos") {
+                    Ok(qpos) => qpos,
+                    Err(_) => {
+                        return Ok(-1);
+                    }
+                };
+                let this = this.borrow::<Record>()?;
+                if this.is_reverse() {
+                    Ok(this.seq_len() as i32 - qpos as i32)
                 } else {
-                    //Err(mlua::Error::RuntimeError("qpos is None".to_string()))
-                    Ok(-1)
+                    Ok(qpos as i32)
                 }
             });
-            */
+            reg.add_field_function_get("distance_from_3prime", |_, this| {
+                let qpos: usize = match this.get_named_user_value("qpos") {
+                    Ok(qpos) => qpos,
+                    Err(_) => {
+                        return Ok(usize::MAX);
+                    }
+                };
+                let this = this.borrow::<Record>()?;
+                if this.is_reverse() {
+                    Ok(qpos)
+                } else {
+                    Ok(this.seq_len() - qpos)
+                }
+            });
         })?;
-
         Ok(Self { lua, filter_func })
     }
 }
 
-struct Pile<'a>(&'a PileupPosition);
-impl<'a> UserData for Pile<'a> {
-    fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("depth", |_, this| Ok(this.0.depth));
-        fields.add_field_method_get("a", |_, this| Ok(this.0.a));
-        fields.add_field_method_get("c", |_, this| Ok(this.0.c));
-        fields.add_field_method_get("g", |_, this| Ok(this.0.g));
-        fields.add_field_method_get("t", |_, this| Ok(this.0.t));
-        fields.add_field_method_get("n", |_, this| Ok(this.0.n));
-        fields.add_field_method_get("fail", |_, this| Ok(this.0.fail));
-        fields.add_field_method_get("ins", |_, this| Ok(this.0.ins));
-        fields.add_field_method_get("del", |_, this| Ok(this.0.del));
-        fields.add_field_method_get("ref_skip", |_, this| Ok(this.0.ref_skip));
-        fields.add_field_method_get("pos", |_, this| Ok(this.0.pos));
-    }
+fn register_pile(lua: &Lua) -> mlua::Result<()> {
+    lua.register_userdata_type::<PileupPosition>(|reg| {
+        reg.add_field_method_get("depth", |_, this| Ok(this.depth));
+        reg.add_field_method_get("a", |_, this| Ok(this.a));
+        reg.add_field_method_get("c", |_, this| Ok(this.c));
+        reg.add_field_method_get("g", |_, this| Ok(this.g));
+        reg.add_field_method_get("t", |_, this| Ok(this.t));
+        reg.add_field_method_get("n", |_, this| Ok(this.n));
+        reg.add_field_method_get("fail", |_, this| Ok(this.fail));
+        reg.add_field_method_get("ins", |_, this| Ok(this.ins));
+        reg.add_field_method_get("del", |_, this| Ok(this.del));
+        reg.add_field_method_get("ref_skip", |_, this| Ok(this.ref_skip));
+        reg.add_field_method_get("pos", |_, this| Ok(this.pos));
+    })
 }
 
 impl<'a> ReadFilter for LuaReadFilter<'a> {
@@ -246,6 +277,7 @@ fn main() -> Result<()> {
     );
 
     let pile_lua = Lua::new();
+    register_pile(&pile_lua)?;
 
     let pile_expression: Option<Function> = if let Some(expression) = opts.pile_expression {
         Some(pile_lua.load(expression.as_str()).into_function()?)
@@ -265,10 +297,8 @@ fn main() -> Result<()> {
             if let Some(pile_expression) = &pile_expression {
                 let r = pile_lua.scope(|scope| {
                     let globals = pile_lua.globals();
-                    let p = scope
-                        .create_nonstatic_userdata(Pile(p))
-                        .expect("error creating user data");
-                    globals.set("pile", p).expect("error setting pile");
+                    let ud = scope.create_any_userdata_ref(p)?;
+                    globals.set("pile", ud).expect("error setting pile");
 
                     pile_expression.call::<_, bool>(())
                 });
@@ -326,6 +356,7 @@ mod tests {
         };
 
         let lua = Lua::new();
+        register_pile(&lua)?;
         let globals = lua.globals();
         for (expected, expression) in [
             (true, "pile.g > 3"),
@@ -337,7 +368,7 @@ mod tests {
             eprintln!("Testing expression: {}", expression);
             lua.scope(|scope| {
                 let p = scope
-                    .create_nonstatic_userdata(Pile(&pileup_position))
+                    .create_any_userdata_ref(&pileup_position)
                     .expect("error creating user data");
                 globals.set("pile", p)?;
                 let f = lua

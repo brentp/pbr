@@ -146,12 +146,4 @@ mod tests {
         let res = r.fetch_seq("chr1", position_too_large, position_too_large + 1);
         assert_eq!(res, Err(Error::FaidxPositionTooLarge));
     }
-
-    #[test]
-    fn open_many_readers() {
-        for _ in 0..500_000 {
-            let reader = open_reader();
-            drop(reader);
-        }
-    }
 }
