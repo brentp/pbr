@@ -18,15 +18,13 @@ start
 stop
 # where in the current read is the pileup given by qpos with convenience of distance_from_[left/right]_end
 qpos
-distance_from_left_end
-distance_from_right_end
+distance_from_5prime
+distance_from_3prime
 insert_size
 qname
-base_qualities # list of base_qualities
 bq # base_quality at current site
-sequence # read sequence
-cigar_string
 length # length of the read sequence
+sequence
 ```
 
 An example expression could be:
@@ -35,7 +33,7 @@ An example expression could be:
 -- high mapping-q    and base-quality for this column
 read.mapping_quality > 10 and read.bq > 20 \
 --  and  not within 10 bases of left end      or     right end
-    and read.distance_from_left_end > 10 and read.distance_from_right_end > 10 \
+    and read.distance_from_5prime > 10 and read.distance_from_3prime > 10 \
 --  and  exclude read if unmapped, not primary, qc_fail, or duplicate.
     and bit32.band(read.flags, bit32.bor(4, 256, 512, 1024)) == 0 \
 --  and exclude read if it has more than 5% N's in the sequence
