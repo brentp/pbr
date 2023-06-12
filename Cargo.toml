@@ -13,8 +13,8 @@ bio = "1.1.0"
 clap = {version="4.3.0", features=["derive", "help"]}
 mimalloc = "0.1.37"
 mlua = {git = "https://github.com/khvzak/mlua", features=["luau", "send", "parking_lot"]}
-perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment"}
-rust-htslib = {version="0.38", features=["static"]}
+perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment-update-rhtslib"}
+rust-htslib = {version="0.43.1", features=["static", "libdeflate"]}
 rust-lapper = "1.1.0"
 
 [profile.release]
