@@ -10,18 +10,23 @@ use clap::Parser;
 use processor::{excluded, BasicProcessor};
 
 use mlua::prelude::*;
-use mlua::Function;
+use mlua::{Function, Value};
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
     read_filter::ReadFilter,
 };
-use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
+use rust_htslib::bam::{
+    self,
+    pileup::Alignment,
+    record::{Aux, Record},
+    Read,
+};
 use std::path::PathBuf;
 
 struct LuaReadFilter<'a> {
     lua: &'a Lua,
-    filter_func: Function<'a>,
+    filter_func: Function,
 }
 
 impl<'a> LuaReadFilter<'a> {
@@ -47,11 +52,11 @@ impl<'a> LuaReadFilter<'a> {
                     .to_string())
             });
             reg.add_function("qpos", |_, this: mlua::AnyUserData| {
-                let r: Result<usize, LuaError> = this.get_named_user_value("qpos");
+                let r: Result<usize, LuaError> = this.named_user_value("qpos");
                 r
             });
             reg.add_field_function_get("bq", |_, this| {
-                let qpos: usize = match this.get_named_user_value("qpos") {
+                let qpos: usize = match this.named_user_value("qpos") {
                     Ok(qpos) => qpos,
                     Err(_) => {
                         return Ok(-1);
@@ -61,7 +66,7 @@ impl<'a> LuaReadFilter<'a> {
                 Ok(this.qual()[qpos] as i32)
             });
             reg.add_field_function_get("distance_from_5prime", |_, this| {
-                let qpos: usize = match this.get_named_user_value("qpos") {
+                let qpos: usize = match this.named_user_value("qpos") {
                     Ok(qpos) => qpos,
                     Err(_) => {
                         return Ok(-1);
@@ -75,7 +80,7 @@ impl<'a> LuaReadFilter<'a> {
                 }
             });
             reg.add_field_function_get("distance_from_3prime", |_, this| {
-                let qpos: usize = match this.get_named_user_value("qpos") {
+                let qpos: usize = match this.named_user_value("qpos") {
                     Ok(qpos) => qpos,
                     Err(_) => {
                         return Ok(usize::MAX);
@@ -88,6 +93,100 @@ impl<'a> LuaReadFilter<'a> {
                     Ok(this.seq_len() - qpos)
                 }
             });
+
+            reg.add_field_method_get("soft_clips_3_prime", |_, this| {
+                let cigar = this.cigar();
+                if this.is_reverse() {
+                    Ok(cigar.leading_softclips())
+                } else {
+                    Ok(cigar.trailing_softclips())
+                }
+            });
+            reg.add_field_method_get("soft_clips_5_prime", |_, this| {
+                let cigar = this.cigar();
+                if this.is_reverse() {
+                    Ok(cigar.trailing_softclips())
+                } else {
+                    Ok(cigar.leading_softclips())
+                }
+            });
+            reg.add_field_method_get("average_base_quality", |_, this| {
+                let qual = this.qual();
+                let sum = qual.iter().map(|q| *q as u64).sum::<u64>();
+                let count = qual.len();
+                Ok(sum as f64 / count as f64)
+            });
+
+            reg.add_method("tag", |lua, this: &Record, tag: String| {
+                let tag = tag.as_bytes();
+                let aux = this.aux(tag).map_err(LuaError::external)?;
+                let lua_val: Value = match aux {
+                    Aux::Char(v) => Value::String(lua.create_string(&[v])?),
+                    Aux::I8(v) => Value::Number(v as f64),
+                    Aux::U8(v) => Value::Number(v as f64),
+                    Aux::I16(v) => Value::Number(v as f64),
+                    Aux::U16(v) => Value::Number(v as f64),
+                    Aux::I32(v) => Value::Number(v as f64),
+                    Aux::U32(v) => Value::Number(v as f64),
+                    Aux::Float(v) => Value::Number(v as f64),
+                    Aux::Double(v) => Value::Number(v as f64),
+                    Aux::String(v) => Value::String(lua.create_string(&v)?),
+                    Aux::ArrayFloat(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(f32::NAN) as f32);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayI32(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(i32::MIN) as i32);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayI8(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(i8::MIN) as i8);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayU8(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(u8::MIN) as u8);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayU16(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(u16::MIN) as u16);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayU32(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(u32::MIN) as u32);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::ArrayI16(v) => {
+                        let mut arr = Vec::new();
+                        for i in 0..v.len() {
+                            arr.push(v.get(i).unwrap_or(i16::MIN) as i16);
+                        }
+                        Value::Table(lua.create_sequence_from(arr)?)
+                    }
+                    Aux::HexByteArray(v) => {
+                        let lstr = String::from_utf8_lossy(v.as_bytes()).to_string();
+                        Value::String(lua.create_string(&lstr)?)
+                    }
+                };
+                Ok(Some(lua_val))
+            })
         })?;
         Ok(Self { lua, filter_func })
     }
@@ -120,7 +219,7 @@ impl<'a> ReadFilter for LuaReadFilter<'a> {
 
             globals.set("read", ud).expect("error setting read");
 
-            self.filter_func.call::<_, bool>(())
+            self.filter_func.call::<bool>(())
         });
 
         match r {
@@ -300,7 +399,7 @@ fn main() -> Result<()> {
                     let ud = scope.create_any_userdata_ref(p)?;
                     globals.set("pile", ud).expect("error setting pile");
 
-                    pile_expression.call::<_, bool>(())
+                    pile_expression.call::<bool>(())
                 });
                 match r {
                     Ok(r) => r,
