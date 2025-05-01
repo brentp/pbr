@@ -1,4 +1,4 @@
-pub use rust_htslib::errors::{Error, Result};
+pub use rust_htslib::errors::Result;
 use rust_htslib::faidx;
 use std::path::Path;
 
@@ -144,6 +144,6 @@ mod tests {
         let mut r = open_reader();
         let position_too_large = i64::MAX as usize;
         let res = r.fetch_seq("chr1", position_too_large, position_too_large + 1);
-        assert_eq!(res, Err(Error::FaidxPositionTooLarge));
+        assert_eq!(res, Err(rust_htslib::errors::Error::FaidxPositionTooLarge));
     }
 }
