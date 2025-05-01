@@ -1,6 +1,6 @@
 [package]
 name = "pbr"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 authors = ["Brent Pedersen"]
 description = "pileups filtered with lua expressions"
