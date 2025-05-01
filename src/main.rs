@@ -19,7 +19,7 @@ use perbase_lib::{
 use rust_htslib::bam::{
     self,
     pileup::Alignment,
-    record::{Aux, Record},
+    record::{Aux, Cigar, Record},
     Read,
 };
 use std::path::PathBuf;
@@ -92,6 +92,20 @@ impl<'a> LuaReadFilter<'a> {
                 } else {
                     Ok(this.seq_len() - qpos)
                 }
+            });
+
+            reg.add_field_method_get("indel_count", |_, this| {
+                let cigar = this.cigar();
+                let mut count = 0;
+                for op in cigar.iter() {
+                    match op {
+                        Cigar::Ins(_) | Cigar::Del(_) => {
+                            count += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(count)
             });
 
             reg.add_field_method_get("soft_clips_3_prime", |_, this| {
