@@ -94,6 +94,34 @@ impl<'a> LuaReadFilter<'a> {
                 }
             });
 
+            reg.add_method("n_proportion_3_prime", |_, this, n_bases: usize| {
+                let seq = this.seq();
+                let mut count = 0;
+                let reverse = this.is_reverse();
+                for i in 0..n_bases {
+                    let base =
+                        seq[if reverse { i } else { seq.len() - 1 - i }].to_ascii_uppercase();
+                    if base == b'N' {
+                        count += 1;
+                    }
+                }
+                Ok(count as f64 / n_bases as f64)
+            });
+
+            reg.add_method("n_proportion_5_prime", |_, this, n_bases: usize| {
+                let seq = this.seq();
+                let mut count = 0;
+                let reverse = this.is_reverse();
+                for i in 0..n_bases {
+                    let base =
+                        seq[if reverse { seq.len() - 1 - i } else { i }].to_ascii_uppercase();
+                    if base == b'N' {
+                        count += 1;
+                    }
+                }
+                Ok(count as f64 / n_bases as f64)
+            });
+
             reg.add_field_method_get("indel_count", |_, this| {
                 let cigar = this.cigar();
                 let mut count = 0;

@@ -1,4 +1,5 @@
 # pbr
+
 [![Rust](https://github.com/brentp/pbr/actions/workflows/rust.yml/badge.svg)](https://github.com/brentp/pbr/actions/workflows/rust.yml)
 drunk on [perbase](https://github.com/sstadick/perbase) pileups and [lua](https://github.com/khvzak/mlua/) expressions.
 
@@ -25,6 +26,12 @@ qname
 bq # base_quality at current site
 length # length of the read sequence
 sequence
+n_proportion_5_prime(bases:number)
+n_proportion_3_prime(bases:number)
+indel_count
+soft_clips_3_prime
+soft_clips_5_prime
+tag(name: string)
 ```
 
 An example expression could be:
