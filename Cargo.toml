@@ -1,6 +1,6 @@
 [package]
 name = "pbr"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 authors = ["Brent Pedersen"]
 description = "pileups filtered with lua expressions"
@@ -19,3 +19,6 @@ rust-lapper = "1.1.0"
 
 [profile.release]
 #codegen-units=1
+
+[dev-dependencies]
+tempfile = "3.10.1"
