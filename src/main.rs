@@ -55,15 +55,17 @@ impl<'a> LuaReadFilter<'a> {
                 let r: Result<usize, LuaError> = this.named_user_value("qpos");
                 r
             });
-            reg.add_field_function_get("bq", |_, this| {
-                let qpos: usize = match this.named_user_value("qpos") {
+            reg.add_field_function_get("bq", |_, this: mlua::AnyUserData| {
+                let qpos: usize = match this.named_user_value::<usize>("qpos") {
                     Ok(qpos) => qpos,
                     Err(_) => {
                         return Ok(-1);
                     }
                 };
-                let this = this.borrow::<Record>()?;
-                Ok(this.qual()[qpos] as i32)
+                this.borrow_scoped::<Record, i32>(|r| match qpos {
+                    usize::MAX => -1,
+                    _ => r.qual()[qpos] as i32,
+                })
             });
             reg.add_field_function_get("distance_from_5prime", |_, this| {
                 let qpos: usize = match this.named_user_value("qpos") {
@@ -72,12 +74,13 @@ impl<'a> LuaReadFilter<'a> {
                         return Ok(-1);
                     }
                 };
-                let this = this.borrow::<Record>()?;
-                if this.is_reverse() {
-                    Ok(this.seq_len() as i32 - qpos as i32)
-                } else {
-                    Ok(qpos as i32)
-                }
+                this.borrow_scoped::<Record, i32>(|r| {
+                    if r.is_reverse() {
+                        r.seq_len() as i32 - qpos as i32
+                    } else {
+                        qpos as i32
+                    }
+                })
             });
             reg.add_field_function_get("distance_from_3prime", |_, this| {
                 let qpos: usize = match this.named_user_value("qpos") {
@@ -86,12 +89,13 @@ impl<'a> LuaReadFilter<'a> {
                         return Ok(usize::MAX);
                     }
                 };
-                let this = this.borrow::<Record>()?;
-                if this.is_reverse() {
-                    Ok(qpos)
-                } else {
-                    Ok(this.seq_len() - qpos)
-                }
+                this.borrow_scoped::<Record, usize>(|r| {
+                    if r.is_reverse() {
+                        qpos
+                    } else {
+                        r.seq_len() - qpos
+                    }
+                })
             });
 
             reg.add_method("n_proportion_3_prime", |_, this, n_bases: usize| {
@@ -257,7 +261,7 @@ impl<'a> ReadFilter for LuaReadFilter<'a> {
         let r = self.lua.scope(|scope| {
             let globals = self.lua.globals();
             let ud = scope.create_any_userdata_ref(read)?;
-            ud.set_named_user_value("qpos", alignment.unwrap().qpos())?;
+            ud.set_named_user_value("qpos", alignment.unwrap().qpos().unwrap_or(usize::MAX))?;
 
             globals.set("read", ud).expect("error setting read");
 
@@ -478,6 +482,62 @@ mod tests {
 
     use super::*;
     use mlua::Lua;
+    use rust_htslib::bam;
+    use rust_htslib::bam::pileup::Pileup;
+    use rust_htslib::bam::record::Record;
+    use rust_htslib::bam::{header::HeaderRecord, Header, HeaderView, IndexedReader, Read};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_read_bq() -> Result<()> {
+        // Create a header with chr1
+        let mut header = Header::new();
+        let mut sq = HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr1");
+        sq.push_tag(b"LN", &1000000u32);
+        header.push_record(&sq);
+        let header_view = HeaderView::from_header(&header);
+
+        // Create a test BAM record using SAM format
+        let record = Record::from_sam(
+            &header_view,
+            b"test_read\t0\tchr1\t100\t30\t4M\t*\t0\t0\tACGT\t&&&&\tRG:Z:test", // Use standard ASCII for qual
+        )
+        .expect("Failed to create record from SAM");
+
+        // Write record to a temporary BAM file
+        let tmp = NamedTempFile::new()?;
+        let path = tmp.path();
+        {
+            let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam)?;
+            writer.write(&record)?;
+        }
+        bam::index::build(path, None, bam::index::Type::Bai, 1)?;
+
+        // Create pileup
+        let mut reader = IndexedReader::from_path(path)?;
+        reader.fetch(("chr1", 100, 101))?; // Fetch the position of the record
+        let mut pileups = reader.pileup();
+        let pileup: Pileup = pileups.next().unwrap().expect("Failed to get pileup");
+
+        // Get the first alignment from the pileup
+        let alignment = pileup
+            .alignments()
+            .next()
+            .expect("No alignment found in pileup");
+
+        let lua = Lua::new();
+        let rf = LuaReadFilter::new(
+            "return read.bq > 0 and read.distance_from_5prime == 0 and read.distance_from_3prime > 0",
+            &lua,
+        )?; // Example expression
+
+        // Test the bq functionality using the alignment from the pileup
+        let result = rf.filter_read(&alignment.record(), Some(&alignment));
+        assert!(result);
+
+        Ok(())
+    }
 
     #[test]
     fn test_pileup_position() -> mlua::Result<()> {
