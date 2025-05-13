@@ -142,7 +142,9 @@ fn main() -> Result<()> {
                 chrom = p.ref_seq,
                 pos = p.pos,
                 depth = p.depth,
-                ref_base = ref_seq.unwrap_or_else(|| p.ref_base.unwrap_or('.').to_string()),
+                ref_base = ref_seq.map(|seq| {
+                    seq.chars().nth(opts.flanking).unwrap_or('.').to_string()
+                }).unwrap_or_else(|| p.ref_base.unwrap_or('.').to_string()),
                 a = p.a,
                 c = p.c,
                 g = p.g,
