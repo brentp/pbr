@@ -143,37 +143,25 @@ impl RegionProcessor for BasicProcessor {
                     };
 
                     let ref_seq = if let Some(fai) = &mut fai {
-                        if self.flanking == 0 {
-                            // When no flanking bases are requested, just get the single base
-                            fai.fetch_seq_string(chrom, pos.pos as usize, pos.pos as usize + 1)
-                                .unwrap_or_else(|_| ".".to_string())
-                                .into()
+                        let window_size = 2 * self.flanking + 1;
+                        let center = pos.pos as isize;
+                        let start = (center - self.flanking as isize).max(0) as usize;
+                        let end = (center + self.flanking as isize + 1) as usize;
+                        let left_padding = if center < self.flanking as isize {
+                            ".".repeat((self.flanking as isize - center) as usize)
                         } else {
-                            let start = if pos.pos >= self.flanking as u32 {
-                                pos.pos - self.flanking as u32
-                            } else {
-                                0
-                            };
-                            let end = pos.pos + self.flanking as u32 + 1;
-                            
-                            let left_padding = if pos.pos < self.flanking as u32 {
-                                ".".repeat(self.flanking - pos.pos as usize)
-                            } else {
-                                String::new()
-                            };
-                            
-                            let seq = fai
-                                .fetch_seq_string(chrom, start as usize, end as usize)
-                                .unwrap_or_else(|_| ".".repeat(2 * self.flanking + 1));
-                            
-                            let right_padding = if seq.len() < 2 * self.flanking + 1 {
-                                ".".repeat(2 * self.flanking + 1 - seq.len())
-                            } else {
-                                String::new()
-                            };
-                            
-                            Some(format!("{}{}{}", left_padding, seq, right_padding))
-                        }
+                            String::new()
+                        };
+                        let seq = fai
+                            .fetch_seq_string(chrom, start, end - 1)
+                            .unwrap_or_else(|_| String::new());
+                        let total_len = left_padding.len() + seq.len();
+                        let right_padding = if total_len < window_size {
+                            ".".repeat(window_size - total_len)
+                        } else {
+                            String::new()
+                        };
+                        Some(format!("{}{}{}", left_padding, seq, right_padding))
                     } else {
                         None
                     };
