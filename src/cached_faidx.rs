@@ -43,15 +43,15 @@ impl CachedFaidx {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn fetch_seq_string<N: AsRef<str> + std::cmp::PartialEq>(
         &mut self,
         chrom: N,
         start: usize,
         end: usize,
     ) -> Result<String> {
-        let bytes = self.fetch_seq(chrom, start, end)?;
-        Ok(std::str::from_utf8(bytes).unwrap().to_owned())
+        let bytes = self.fetch_seq(&chrom, start, end)?;
+        let seq = std::str::from_utf8(bytes).unwrap().to_owned();
+        Ok(seq)
     }
 
     pub fn fetch_seq<N: AsRef<str> + std::cmp::PartialEq>(

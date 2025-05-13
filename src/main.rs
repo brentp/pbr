@@ -12,12 +12,29 @@ use mlua::prelude::*;
 use mlua::Function;
 use perbase_lib::{
     par_granges,
-    position::pileup_position::PileupPosition,
 };
 use std::path::PathBuf;
 
+pub struct PileupPositionWithBases {
+    pub ref_seq: String,
+    pub pos: u32,
+    pub ref_base: Option<char>,
+    pub depth: u32,
+    pub a: u32,
+    pub c: u32,
+    pub g: u32,
+    pub t: u32,
+    pub n: u32,
+    pub ins: u32,
+    pub del: u32,
+    pub ref_skip: u32,
+    pub fail: u32,
+    pub near_max_depth: bool,
+    pub ref_bases: Option<String>,
+}
+
 fn register_pile(lua: &Lua) -> mlua::Result<()> {
-    lua.register_userdata_type::<PileupPosition>(|reg| {
+    lua.register_userdata_type::<PileupPositionWithBases>(|reg| {
         reg.add_field_method_get("depth", |_, this| Ok(this.depth));
         reg.add_field_method_get("a", |_, this| Ok(this.a));
         reg.add_field_method_get("c", |_, this| Ok(this.c));
@@ -29,6 +46,7 @@ fn register_pile(lua: &Lua) -> mlua::Result<()> {
         reg.add_field_method_get("del", |_, this| Ok(this.del));
         reg.add_field_method_get("ref_skip", |_, this| Ok(this.ref_skip));
         reg.add_field_method_get("pos", |_, this| Ok(this.pos));
+        reg.add_field_method_get("ref_base", |_, this| Ok(this.ref_bases.clone().unwrap_or_else(|| ".".to_string())));
     })
 }
 
@@ -115,14 +133,31 @@ fn main() -> Result<()> {
     receiver
         .into_iter()
         .filter(|(p, _)| p.depth > 0)
-        // filter on the pile expression
-        .filter(|(p, _)| {
+        .map(|(p, ref_seq)| {
+            PileupPositionWithBases {
+                ref_seq: p.ref_seq.to_string(),
+                pos: p.pos,
+                ref_base: p.ref_base,
+                depth: p.depth,
+                a: p.a,
+                c: p.c,
+                g: p.g,
+                t: p.t,
+                n: p.n,
+                ins: p.ins,
+                del: p.del,
+                ref_skip: p.ref_skip,
+                fail: p.fail,
+                near_max_depth: p.near_max_depth,
+                ref_bases: ref_seq.clone(),
+            }
+        })
+        .filter(|pile| {
             if let Some(pile_expression) = &pile_expression {
                 let r = pile_lua.scope(|scope| {
                     let globals = pile_lua.globals();
-                    let ud = scope.create_any_userdata_ref(p)?;
+                    let ud = scope.create_any_userdata_ref(pile)?;
                     globals.set("pile", ud).expect("error setting pile");
-
                     pile_expression.call::<bool>(())
                 });
                 match r {
@@ -136,20 +171,18 @@ fn main() -> Result<()> {
                 true
             }
         })
-        .for_each(|(p, ref_seq)| {
+        .for_each(|pile| {
             println!(
                 "{chrom}\t{pos}\t{ref_base}\t{depth}\t{a}\t{c}\t{g}\t{t}\t{n}",
-                chrom = p.ref_seq,
-                pos = p.pos,
-                depth = p.depth,
-                ref_base = ref_seq.map(|seq| {
-                    seq.chars().nth(opts.flanking).unwrap_or('.').to_string()
-                }).unwrap_or_else(|| p.ref_base.unwrap_or('.').to_string()),
-                a = p.a,
-                c = p.c,
-                g = p.g,
-                t = p.t,
-                n = p.n
+                chrom = pile.ref_seq,
+                pos = pile.pos,
+                depth = pile.depth,
+                ref_base = pile.ref_bases.clone().unwrap_or_else(|| ".".repeat(2 * opts.flanking + 1)),
+                a = pile.a,
+                c = pile.c,
+                g = pile.g,
+                t = pile.t,
+                n = pile.n
             );
         });
 
@@ -219,46 +252,69 @@ mod tests {
     }
 
     #[test]
-    fn test_pileup_position() -> mlua::Result<()> {
-        let pileup_position = PileupPosition {
+    fn test_pileup_position_with_bases() -> mlua::Result<()> {
+        let pile = PileupPositionWithBases {
+            ref_seq: "chr1".to_string(),
+            pos: 10,
+            ref_base: Some('A'),
             depth: 10,
             a: 1,
             c: 2,
             g: 3,
             t: 4,
             n: 5,
-            fail: 6,
             ins: 7,
             del: 8,
             ref_skip: 9,
-            pos: 10,
-            ..Default::default()
+            fail: 6,
+            near_max_depth: false,
+            ref_bases: Some("AAG".to_string()),
         };
 
         let lua = Lua::new();
         register_pile(&lua)?;
         let globals = lua.globals();
-        for (expected, expression) in [
-            (true, "pile.g > 3"),
-            (true, "pile.a > 0"),
-            (false, "pile.a > 10"),
-            (false, "pile.ref_skip == 100"),
-            (true, "pile.ref_skip == 9"),
-        ] {
-            eprintln!("Testing expression: {}", expression);
-            lua.scope(|scope| {
-                let p = scope
-                    .create_any_userdata_ref(&pileup_position)
-                    .expect("error creating user data");
-                globals.set("pile", p)?;
-                let f = lua
-                    .load(&(String::from("return ") + expression))
-                    .into_function()?;
-                let result: bool = f.call(())?;
-                Ok(result == expected)
-            })
-            .expect("error evaluating expression");
-        }
+
+        // Test 1: Check if depth is correct
+        lua.scope(|scope| {
+            let ud = scope.create_any_userdata_ref(&pile)?;
+            globals.set("pile", ud)?;
+            let f = lua.load("return pile.depth == 10").into_function()?;
+            let result: bool = f.call(())?;
+            assert!(result);
+            Ok(())
+        })?;
+
+        // Test 2: Check if ref_base is correct
+        lua.scope(|scope| {
+            let ud = scope.create_any_userdata_ref(&pile)?;
+            globals.set("pile", ud)?;
+            let f = lua.load("return pile.ref_base == 'AAG'").into_function()?;
+            let result: bool = f.call(())?;
+            assert!(result);
+            Ok(())
+        })?;
+
+        // Test 3: Check if a count is correct
+        lua.scope(|scope| {
+            let ud = scope.create_any_userdata_ref(&pile)?;
+            globals.set("pile", ud)?;
+            let f = lua.load("return pile.a == 1").into_function()?;
+            let result: bool = f.call(())?;
+            assert!(result);
+            Ok(())
+        })?;
+
+        // Test 4: Check if g count is correct
+        lua.scope(|scope| {
+            let ud = scope.create_any_userdata_ref(&pile)?;
+            globals.set("pile", ud)?;
+            let f = lua.load("return pile.g == 3").into_function()?;
+            let result: bool = f.call(())?;
+            assert!(result);
+            Ok(())
+        })?;
+
         Ok(())
     }
 }
