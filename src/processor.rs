@@ -143,30 +143,37 @@ impl RegionProcessor for BasicProcessor {
                     };
 
                     let ref_seq = if let Some(fai) = &mut fai {
-                        let start = if pos.pos >= self.flanking as u32 {
-                            pos.pos - self.flanking as u32
+                        if self.flanking == 0 {
+                            // When no flanking bases are requested, just get the single base
+                            fai.fetch_seq_string(chrom, pos.pos as usize, pos.pos as usize + 1)
+                                .unwrap_or_else(|_| ".".to_string())
+                                .into()
                         } else {
-                            0
-                        };
-                        let end = pos.pos + self.flanking as u32 + 1;
-                        
-                        let left_padding = if pos.pos < self.flanking as u32 {
-                            ".".repeat(self.flanking - pos.pos as usize)
-                        } else {
-                            String::new()
-                        };
-                        
-                        let seq = fai
-                            .fetch_seq_string(chrom, start as usize, end as usize)
-                            .unwrap_or_else(|_| ".".repeat(2 * self.flanking + 1));
-                        
-                        let right_padding = if seq.len() < 2 * self.flanking + 1 {
-                            ".".repeat(2 * self.flanking + 1 - seq.len())
-                        } else {
-                            String::new()
-                        };
-                        
-                        Some(format!("{}{}{}", left_padding, seq, right_padding))
+                            let start = if pos.pos >= self.flanking as u32 {
+                                pos.pos - self.flanking as u32
+                            } else {
+                                0
+                            };
+                            let end = pos.pos + self.flanking as u32 + 1;
+                            
+                            let left_padding = if pos.pos < self.flanking as u32 {
+                                ".".repeat(self.flanking - pos.pos as usize)
+                            } else {
+                                String::new()
+                            };
+                            
+                            let seq = fai
+                                .fetch_seq_string(chrom, start as usize, end as usize)
+                                .unwrap_or_else(|_| ".".repeat(2 * self.flanking + 1));
+                            
+                            let right_padding = if seq.len() < 2 * self.flanking + 1 {
+                                ".".repeat(2 * self.flanking + 1 - seq.len())
+                            } else {
+                                String::new()
+                            };
+                            
+                            Some(format!("{}{}{}", left_padding, seq, right_padding))
+                        }
                     } else {
                         None
                     };
