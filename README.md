@@ -53,6 +53,12 @@ Filter rows where the reference window is `'AAG'`:
 pbr test/simple_test.bam -f test/simple_test.fa -t 4 --mate-fix --max-depth 500000 -k 1 --pile-expression "return pile.ref_base == 'AAG'"
 ```
 
+Filter reads with a specific tag, e.g., `RG:Z:test`:
+
+```bash
+pbr test/simple_test.bam -f test/simple_test.fa -t 4 --mate-fix --max-depth 500000 -k 0 --pile-expression "return read:tag('RG') == 'test'"
+```
+
 ## Output
 
 The output is a tab-separated file with the following columns:
