@@ -1,7 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use bio::io::bed;
-use rust_htslib::bam::{pileup::Pileup, HeaderView};
+use rust_htslib::bam::{pileup::Pileup, HeaderView, self, Read};
 use rust_lapper::{Interval, Lapper};
+use mlua::Lua;
+use perbase_lib::{
+    par_granges::RegionProcessor,
+    position::pileup_position::PileupPosition,
+};
+use crate::cached_faidx::CachedFaidx;
+use crate::lua_filter::LuaReadFilter;
 
 use std::path::PathBuf;
 
@@ -13,6 +20,7 @@ pub(crate) struct BasicProcessor {
     pub(crate) exclude_regions: Option<PathBuf>,
     pub(crate) mate_fix: bool,
     pub(crate) fasta_path: Option<PathBuf>,
+    pub(crate) flanking: usize,
 }
 
 impl BasicProcessor {
@@ -64,13 +72,111 @@ impl BasicProcessor {
 pub(crate) fn excluded(exclude_intervals: &Option<Vec<Lapper<u32, ()>>>, p: &Pileup) -> bool {
     match exclude_intervals {
         Some(ref intervals) => {
-            if p.tid() as usize >= intervals.len() {
-                return false;
-            }
-            let ivs = &intervals[p.tid() as usize];
             let pos = p.pos();
-            ivs.count(pos, pos + 1) > 0
+            intervals[p.tid() as usize].find(pos, pos + 1).next().is_some()
         }
         None => false,
+    }
+}
+
+impl RegionProcessor for BasicProcessor {
+    type P = (PileupPosition, Option<String>);
+
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
+        let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
+        let mut fai = if let Some(fasta) = &self.fasta_path {
+            reader.set_reference(fasta).expect("reference");
+            Some(CachedFaidx::new(fasta).expect("error reading fasta"))
+        } else {
+            None
+        };
+
+        let header = reader.header().to_owned();
+        let lua = Lua::new();
+
+        let rf = LuaReadFilter::new(&self.expression, &lua).unwrap_or_else(|_| {
+            panic!(
+                "error creating lua read filter with expression {}",
+                &self.expression
+            )
+        });
+
+        let exclude_intervals = self.exclude_regions.as_ref().map(|regions_bed| {
+            Self::bed_to_intervals(&header, regions_bed, true).expect("BED file")
+        });
+
+        let string_count = rf
+            .lua
+            .create_function(|_, (haystack, needle): (String, String)| {
+                assert!(needle.len() == 1);
+                let needle = needle.chars().next().unwrap();
+                Ok(haystack.chars().filter(|c| *c == needle).count())
+            })
+            .expect("eror creating function");
+        rf.lua
+            .globals()
+            .set("string_count", string_count)
+            .expect("error setting string_count");
+
+        // fetch the region
+        reader.fetch((tid, start, stop)).expect("Fetched ROI");
+        // Walk over pileups
+        let mut p = reader.pileup();
+        let chrom = unsafe { std::str::from_utf8_unchecked(header.target_names()[tid as usize]) };
+        p.set_max_depth(self.max_depth);
+        let result: Vec<(PileupPosition, Option<String>)> = p
+            .flat_map(|p| {
+                let pileup = p.expect("Extracted a pileup");
+                // Verify that we are within the bounds of the chunk we are iterating on
+                // Since pileup will pull reads that overhang edges.
+                if pileup.pos() >= start
+                    && pileup.pos() < stop
+                    // and check if this position is excluded.
+                    && !excluded(&exclude_intervals, &pileup)
+                {
+                    let pos = if self.mate_fix {
+                        PileupPosition::from_pileup_mate_aware(
+                            pileup, &header, &rf, None,
+                        )
+                    } else {
+                        PileupPosition::from_pileup(pileup, &header, &rf, None)
+                    };
+
+                    let ref_seq = if let Some(fai) = &mut fai {
+                        let start = if pos.pos >= self.flanking as u32 {
+                            pos.pos - self.flanking as u32
+                        } else {
+                            0
+                        };
+                        let end = pos.pos + self.flanking as u32 + 1;
+                        
+                        let left_padding = if pos.pos < self.flanking as u32 {
+                            ".".repeat(self.flanking - pos.pos as usize)
+                        } else {
+                            String::new()
+                        };
+                        
+                        let seq = fai
+                            .fetch_seq_string(chrom, start as usize, end as usize)
+                            .unwrap_or_else(|_| ".".repeat(2 * self.flanking + 1));
+                        
+                        let right_padding = if seq.len() < 2 * self.flanking + 1 {
+                            ".".repeat(2 * self.flanking + 1 - seq.len())
+                        } else {
+                            String::new()
+                        };
+                        
+                        Some(format!("{}{}{}", left_padding, seq, right_padding))
+                    } else {
+                        None
+                    };
+
+                    Some((pos, ref_seq))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        result
     }
 }
