@@ -1,0 +1,9 @@
+@HD	VN:1.6	SO:coordinate
+@SQ	SN:premiRNA_MIR3648-1_166608	LN:60
+@SQ	SN:premiRNA_MIR3648_166608xxxxxx	LN:60
+@RG	ID:test	SM:test
+@PG	ID:samtools	PN:samtools	VN:1.21	CL:samtools view -bS test/simple_test.sam
+@PG	ID:samtools.1	PN:samtools	PP:samtools	VN:1.21	CL:samtools view -h simple_test.bam
+read1	0	premiRNA_MIR3648-1_166608	1	60	10M	*	0	0	AAGAAATAAC	*	RG:Z:test
+read2	0	premiRNA_MIR3648-1_166608	58	60	3M	*	0	0	AGT	*	RG:Z:test
+read3	0	premiRNA_MIR3648_166608xxxxxx	1	60	10M	*	0	0	CCAACAAGCA	*	RG:Z:test
