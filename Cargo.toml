@@ -1,6 +1,6 @@
 [package]
 name = "pbr"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Brent Pedersen"]
 description = "pileups filtered with lua expressions"
@@ -13,12 +13,19 @@ bio = "1.1.0"
 clap = {version="4.3.0", features=["derive", "help"]}
 mimalloc = "0.1.37"
 mlua = {version = "0.10.3", features=["luau", "send"]}
-perbase = {git = "https://github.com/brentp/perbase", branch="read_filter_alignment-update-rhtslib"}
-rust-htslib = {version="0.43.1", features=["static", "libdeflate"]}
+perbase = {git = "https://github.com/brentp/perbase", rev="2b96a92"}
+#rust-htslib = {git = "https://github.com/brentp/rust-htslib", branch = "faidx-sl", features=["static"]}
+rust-htslib = {git = "https://github.com/brentp/rust-htslib", rev = "b130834", features=["static"]}
 rust-lapper = "1.1.0"
 
 [profile.release]
-#codegen-units=1
+codegen-units=1
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+
 
 [dev-dependencies]
 tempfile = "3.10.1"
