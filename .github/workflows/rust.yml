@@ -28,6 +28,9 @@ jobs:
         run: cargo install cross
       - name: Build binary
         run: cross build --target ${{ matrix.target }} --release
+      - name: Make binary executable
+        # UPDATED: Ensure the binary has the executable bit set
+        run: chmod +x target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -58,6 +61,9 @@ jobs:
           lipo -create -output target/release/${{ env.CRATE_NAME }} \
             target/x86_64-apple-darwin/release/${{ env.CRATE_NAME }} \
             target/aarch64-apple-darwin/release/${{ env.CRATE_NAME }}
+      - name: Make binary executable
+        # UPDATED: Ensure the universal binary has the executable bit set
+        run: chmod +x target/release/${{ env.CRATE_NAME }}
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -77,13 +83,9 @@ jobs:
           path: artifacts/
 
       - name: Package Binaries into Tar Archives
-        # UPDATED: This step now creates .tar.gz files instead of renaming binaries
         run: |
           cd artifacts
           for dir in *; do
-            # dir will be "pbr-aarch64-unknown-linux-musl", etc.
-            # Create a tar.gz file named after the directory, containing the 'pbr' binary.
-            # The -C flag changes the directory so the binary is at the root of the archive.
             tar -czf "$dir.tar.gz" -C "$dir" ${{ env.CRATE_NAME }}
           done
           cd ..
@@ -95,5 +97,4 @@ jobs:
           name: 'Latest Prerelease'
           body: 'This is a pre-release with the latest binaries from the main branch.'
           prerelease: true
-          # UPDATED: The glob now finds the .tar.gz files to upload
           files: artifacts/*.tar.gz
