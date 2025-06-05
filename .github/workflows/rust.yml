@@ -1,22 +1,101 @@
-name: Rust
+name: Release Binaries
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: ['main']
 
 env:
   CARGO_TERM_COLOR: always
+  # The name of your Rust crate (should match the name in Cargo.toml)
+  CRATE_NAME: pbr
 
 jobs:
-  build:
-
+  build-linux:
+    name: Build Linux Binaries
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        # Build for both common Linux architectures
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v3
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev=3de41a0
+      - name: Build binary
+        run: cross build --target ${{ matrix.target }} --release
+      - name: Strip binary
+        run: strip target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.CRATE_NAME }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
+
+  build-macos:
+    name: Build macOS Universal Binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          # Add both Apple Silicon and Intel targets
+          target: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Build for Intel
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build for Apple Silicon
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Create Universal Binary
+        run: |
+          lipo -create -output target/release/${{ env.CRATE_NAME }} \
+            target/x86_64-apple-darwin/release/${{ env.CRATE_NAME }} \
+            target/aarch64-apple-darwin/release/${{ env.CRATE_NAME }}
+
+      - name: Strip binary
+        run: strip target/release/${{ env.CRATE_NAME }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.CRATE_NAME }}-apple-universal
+          path: target/release/${{ env.CRATE_NAME }}
+
+  release:
+    name: Create Prerelease
+    # This job will run after the build jobs are complete
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    # The action needs permissions to write to the repository to create a release
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          # The destination directory for the downloaded artifacts
+          path: artifacts/
+
+      - name: Create or Update Prerelease with Binaries
+        uses: softprops/action-gh-release@v1
+        with:
+          # Use a static tag name. This ensures that the same release is updated
+          # on every push, replacing the old binaries.
+          tag_name: 'latest-prerelease'
+          name: 'Latest Prerelease'
+          body: 'This is a pre-release with the latest binaries from the main branch.'
+          # Mark this release as a prerelease
+          prerelease: true
+          # A glob pattern to find all the binary files in the artifacts directory
+          files: artifacts/*/*
