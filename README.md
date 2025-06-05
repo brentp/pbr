@@ -1,4 +1,4 @@
-# PBR (Pileup Base Reporter)
+# pbr
 
 [![Rust](https://github.com/brentp/pbr/actions/workflows/rust.yml/badge.svg)](https://github.com/brentp/pbr/actions/workflows/rust.yml)
 drunk on [perbase](https://github.com/sstadick/perbase) pileups and [lua](https://github.com/khvzak/mlua/) expressions.

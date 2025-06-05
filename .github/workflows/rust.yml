@@ -75,6 +75,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+
+      - name: Package Binaries into Tar Archives
+        # UPDATED: This step now creates .tar.gz files instead of renaming binaries
+        run: |
+          cd artifacts
+          for dir in *; do
+            # dir will be "pbr-aarch64-unknown-linux-musl", etc.
+            # Create a tar.gz file named after the directory, containing the 'pbr' binary.
+            # The -C flag changes the directory so the binary is at the root of the archive.
+            tar -czf "$dir.tar.gz" -C "$dir" ${{ env.CRATE_NAME }}
+          done
+          cd ..
+
       - name: Create or Update Prerelease with Binaries
         uses: softprops/action-gh-release@v1
         with:
@@ -82,4 +95,5 @@ jobs:
           name: 'Latest Prerelease'
           body: 'This is a pre-release with the latest binaries from the main branch.'
           prerelease: true
-          files: artifacts/*/*
+          # UPDATED: The glob now finds the .tar.gz files to upload
+          files: artifacts/*.tar.gz
