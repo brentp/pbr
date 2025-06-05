@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Build for both common Linux architectures
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v3
@@ -26,12 +25,9 @@ jobs:
           toolchain: stable
           override: true
       - name: Install cross
-        # UPDATED: Install latest stable version of cross from crates.io
         run: cargo install cross
       - name: Build binary
         run: cross build --target ${{ matrix.target }} --release
-      - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -49,24 +45,19 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-          # Add both Apple Silicon and Intel targets
-          target: aarch64-apple-darwin, x86_64-apple-darwin
-
+      - name: Add required targets
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
       - name: Build for Intel
         run: cargo build --release --target x86_64-apple-darwin
-
       - name: Build for Apple Silicon
         run: cargo build --release --target aarch64-apple-darwin
-
       - name: Create Universal Binary
         run: |
           lipo -create -output target/release/${{ env.CRATE_NAME }} \
             target/x86_64-apple-darwin/release/${{ env.CRATE_NAME }} \
             target/aarch64-apple-darwin/release/${{ env.CRATE_NAME }}
-
-      - name: Strip binary
-        run: strip target/release/${{ env.CRATE_NAME }}
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -75,28 +66,20 @@ jobs:
 
   release:
     name: Create Prerelease
-    # This job will run after the build jobs are complete
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
-    # The action needs permissions to write to the repository to create a release
     permissions:
       contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          # The destination directory for the downloaded artifacts
           path: artifacts/
-
       - name: Create or Update Prerelease with Binaries
         uses: softprops/action-gh-release@v1
         with:
-          # Use a static tag name. This ensures that the same release is updated
-          # on every push, replacing the old binaries.
           tag_name: 'latest-prerelease'
           name: 'Latest Prerelease'
           body: 'This is a pre-release with the latest binaries from the main branch.'
-          # Mark this release as a prerelease
           prerelease: true
-          # A glob pattern to find all the binary files in the artifacts directory
           files: artifacts/*/*
