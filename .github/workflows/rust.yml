@@ -32,7 +32,8 @@ jobs:
       - name: Strip binary
         run: strip target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        # UPDATED arazzo-action
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.CRATE_NAME }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}
@@ -67,7 +68,8 @@ jobs:
         run: strip target/release/${{ env.CRATE_NAME }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        # UPDATED arazzo-action
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.CRATE_NAME }}-apple-universal
           path: target/release/${{ env.CRATE_NAME }}
@@ -82,7 +84,8 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        # UPDATED arazzo-action
+        uses: actions/download-artifact@v4
         with:
           # The destination directory for the downloaded artifacts
           path: artifacts/
