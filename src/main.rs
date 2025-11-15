@@ -359,7 +359,7 @@ impl RegionProcessor for BasicProcessor {
 }
 
 #[derive(Parser, Default, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, arg_required_else_help = true)]
 struct Args {
     #[arg(help = "Path to the bamfile")]
     bam_path: PathBuf,
@@ -393,6 +393,8 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    println!("# pbr version {}", env!("CARGO_PKG_VERSION"));
+
     let opts = Args::parse();
 
     if !opts.expression.contains("return") {

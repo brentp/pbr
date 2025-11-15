@@ -3,6 +3,7 @@ use bio::io::bed;
 use rust_htslib::bam::{pileup::Pileup, HeaderView};
 use rust_lapper::{Interval, Lapper};
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub(crate) struct BasicProcessor {
@@ -24,11 +25,19 @@ impl BasicProcessor {
     ) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];
+        let mut missing_chroms: HashSet<String> = HashSet::new();
         for (i, record) in bed_reader.records().enumerate() {
             let record = record?;
-            let tid = header
-                .tid(record.chrom().as_bytes())
-                .expect("Chromosome not found in BAM/CRAM header");
+            let chrom = record.chrom();
+            let Some(tid) = header.tid(chrom.as_bytes()) else {
+                if missing_chroms.insert(chrom.to_string()) {
+                    eprintln!(
+                        "Chromosome {} not found in BAM/CRAM header; skipping intervals",
+                        chrom
+                    );
+                }
+                continue;
+            };
             let start = record
                 .start()
                 .try_into()
