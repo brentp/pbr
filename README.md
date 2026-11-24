@@ -31,6 +31,7 @@ n_proportion_3_prime(bases:number)
 indel_count
 soft_clips_3_prime
 soft_clips_5_prime
+average_base_quality
 tag(name: string)
 ```
 
@@ -87,7 +88,7 @@ Note that the pile-expression is also a lua expression; it is applied to the Pil
 The available attributes on the `pile` object are:
 
 ```
-depth,a,c,g,t,n,fail,ins,del,ref_skip
+depth,a,c,g,t,n,fail,ins,del,ref_skip,pos
 ```
 
 An example --pile-expression would look like:
