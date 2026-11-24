@@ -10,7 +10,7 @@ use clap::Parser;
 use processor::{excluded, BasicProcessor};
 
 use mlua::prelude::*;
-use mlua::{Function, Value};
+use mlua::{AnyUserData, Compiler, Function, UserData, UserDataFields, UserDataMethods, Value};
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
@@ -22,112 +22,113 @@ use rust_htslib::bam::{
     record::{Aux, Cigar, Record},
     Read,
 };
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-struct LuaReadFilter<'a> {
-    lua: &'a Lua,
-    filter_func: Function,
+struct ReadSlot {
+    record: Cell<*const Record>,
+    qpos: Cell<usize>,
 }
 
-impl<'a> LuaReadFilter<'a> {
-    // Create a new LuaReadFilter instance with the given expression
-    fn new(expression: &str, lua: &'a Lua) -> Result<Self> {
-        let filter_func = lua.load(expression).into_function()?;
-        lua.register_userdata_type::<Record>(|reg| {
-            reg.add_field_method_get("mapping_quality", |_, this| Ok(this.mapq()));
-            reg.add_field_method_get("flags", |_, this| Ok(this.flags()));
-            reg.add_field_method_get("tid", |_, this| Ok(this.tid()));
-            reg.add_field_method_get("start", |_, this| Ok(this.pos()));
-            reg.add_field_method_get("stop", |_, this| Ok(this.cigar().end_pos()));
-            reg.add_field_method_get("length", |_, this| Ok(this.seq_len()));
-            reg.add_field_method_get("insert_size", |_, this| Ok(this.insert_size()));
-            reg.add_field_method_get("qname", |_, this| {
-                let q = this.qname();
+// SAFETY: ReadSlot is strictly confined to the single thread owning its Lua VM.
+// The raw pointer is only non-null during a synchronous filter_read call and is
+// always cleared by ReadSlotGuard on return or unwind.
+unsafe impl Send for ReadSlot {}
+unsafe impl Sync for ReadSlot {}
+
+struct ReadSlotGuard<'a>(&'a ReadSlot);
+
+impl Drop for ReadSlotGuard<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.record.set(std::ptr::null());
+        self.0.qpos.set(usize::MAX);
+    }
+}
+
+#[derive(Clone)]
+struct LuaRead(Arc<ReadSlot>);
+
+impl LuaRead {
+    #[inline(always)]
+    fn with_record<T>(&self, f: impl FnOnce(&Record) -> mlua::Result<T>) -> mlua::Result<T> {
+        let ptr = self.0.record.get();
+        if ptr.is_null() {
+            return Err(LuaError::RuntimeError(
+                "read reference is no longer valid".to_string(),
+            ));
+        }
+        // SAFETY: ptr points to a valid &Record for the duration of filter_read.
+        f(unsafe { &*ptr })
+    }
+}
+
+impl UserData for LuaRead {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("mapping_quality", |_, this| {
+            this.with_record(|r| Ok(r.mapq()))
+        });
+        fields.add_field_method_get("flags", |_, this| this.with_record(|r| Ok(r.flags())));
+        fields.add_field_method_get("tid", |_, this| this.with_record(|r| Ok(r.tid())));
+        fields.add_field_method_get("start", |_, this| this.with_record(|r| Ok(r.pos())));
+        fields.add_field_method_get("stop", |_, this| {
+            this.with_record(|r| Ok(r.cigar().end_pos()))
+        });
+        fields.add_field_method_get("length", |_, this| this.with_record(|r| Ok(r.seq_len())));
+        fields.add_field_method_get("insert_size", |_, this| {
+            this.with_record(|r| Ok(r.insert_size()))
+        });
+        fields.add_field_method_get("qname", |_, this| {
+            this.with_record(|r| {
+                let q = r.qname();
                 Ok(std::str::from_utf8(q).unwrap_or("").to_string())
-            });
-            reg.add_field_method_get("sequence", |_, this| {
-                let seq = this.seq();
+            })
+        });
+        fields.add_field_method_get("sequence", |_, this| {
+            this.with_record(|r| {
+                let seq = r.seq();
                 Ok(std::str::from_utf8(&seq.as_bytes())
                     .unwrap_or("")
                     .to_string())
-            });
-            reg.add_function("qpos", |_, this: mlua::AnyUserData| {
-                let r: Result<usize, LuaError> = this.named_user_value("qpos");
-                r
-            });
-            reg.add_field_function_get("bq", |_, this: mlua::AnyUserData| {
-                let qpos: usize = match this.named_user_value::<usize>("qpos") {
-                    Ok(qpos) => qpos,
-                    Err(_) => {
-                        return Ok(-1);
-                    }
-                };
-                this.borrow_scoped::<Record, i32>(|r| match qpos {
-                    usize::MAX => -1,
-                    _ => r.qual()[qpos] as i32,
-                })
-            });
-            reg.add_field_function_get("distance_from_5prime", |_, this| {
-                let qpos: usize = match this.named_user_value("qpos") {
-                    Ok(qpos) => qpos,
-                    Err(_) => {
-                        return Ok(-1);
-                    }
-                };
-                this.borrow_scoped::<Record, i32>(|r| {
-                    if r.is_reverse() {
-                        r.seq_len() as i32 - qpos as i32
-                    } else {
-                        qpos as i32
-                    }
-                })
-            });
-            reg.add_field_function_get("distance_from_3prime", |_, this| {
-                let qpos: usize = match this.named_user_value("qpos") {
-                    Ok(qpos) => qpos,
-                    Err(_) => {
-                        return Ok(usize::MAX);
-                    }
-                };
-                this.borrow_scoped::<Record, usize>(|r| {
-                    if r.is_reverse() {
-                        qpos
-                    } else {
-                        r.seq_len() - qpos
-                    }
-                })
-            });
-
-            reg.add_method("n_proportion_3_prime", |_, this, n_bases: usize| {
-                let seq = this.seq();
-                let mut count = 0;
-                let reverse = this.is_reverse();
-                for i in 0..n_bases {
-                    let base =
-                        seq[if reverse { i } else { seq.len() - 1 - i }].to_ascii_uppercase();
-                    if base == b'N' {
-                        count += 1;
-                    }
+            })
+        });
+        fields.add_field_method_get("bq", |_, this| {
+            let qpos = this.0.qpos.get();
+            if qpos == usize::MAX {
+                return Ok(-1);
+            }
+            this.with_record(|r| Ok(r.qual()[qpos] as i32))
+        });
+        fields.add_field_method_get("distance_from_5prime", |_, this| {
+            let qpos = this.0.qpos.get();
+            if qpos == usize::MAX {
+                return Ok(-1);
+            }
+            this.with_record(|r| {
+                if r.is_reverse() {
+                    Ok(r.seq_len() as i32 - qpos as i32)
+                } else {
+                    Ok(qpos as i32)
                 }
-                Ok(count as f64 / n_bases as f64)
-            });
-
-            reg.add_method("n_proportion_5_prime", |_, this, n_bases: usize| {
-                let seq = this.seq();
-                let mut count = 0;
-                let reverse = this.is_reverse();
-                for i in 0..n_bases {
-                    let base =
-                        seq[if reverse { seq.len() - 1 - i } else { i }].to_ascii_uppercase();
-                    if base == b'N' {
-                        count += 1;
-                    }
+            })
+        });
+        fields.add_field_method_get("distance_from_3prime", |_, this| {
+            let qpos = this.0.qpos.get();
+            if qpos == usize::MAX {
+                return Ok(usize::MAX);
+            }
+            this.with_record(|r| {
+                if r.is_reverse() {
+                    Ok(qpos)
+                } else {
+                    Ok(r.seq_len() - qpos)
                 }
-                Ok(count as f64 / n_bases as f64)
-            });
-
-            reg.add_field_method_get("indel_count", |_, this| {
-                let cigar = this.cigar();
+            })
+        });
+        fields.add_field_method_get("indel_count", |_, this| {
+            this.with_record(|r| {
+                let cigar = r.cigar();
                 let mut count = 0;
                 for op in cigar.iter() {
                     match op {
@@ -138,34 +139,77 @@ impl<'a> LuaReadFilter<'a> {
                     }
                 }
                 Ok(count)
-            });
-
-            reg.add_field_method_get("soft_clips_3_prime", |_, this| {
-                let cigar = this.cigar();
-                if this.is_reverse() {
+            })
+        });
+        fields.add_field_method_get("soft_clips_3_prime", |_, this| {
+            this.with_record(|r| {
+                let cigar = r.cigar();
+                if r.is_reverse() {
                     Ok(cigar.leading_softclips())
                 } else {
                     Ok(cigar.trailing_softclips())
                 }
-            });
-            reg.add_field_method_get("soft_clips_5_prime", |_, this| {
-                let cigar = this.cigar();
-                if this.is_reverse() {
+            })
+        });
+        fields.add_field_method_get("soft_clips_5_prime", |_, this| {
+            this.with_record(|r| {
+                let cigar = r.cigar();
+                if r.is_reverse() {
                     Ok(cigar.trailing_softclips())
                 } else {
                     Ok(cigar.leading_softclips())
                 }
-            });
-            reg.add_field_method_get("average_base_quality", |_, this| {
-                let qual = this.qual();
+            })
+        });
+        fields.add_field_method_get("average_base_quality", |_, this| {
+            this.with_record(|r| {
+                let qual = r.qual();
                 let sum = qual.iter().map(|q| *q as u64).sum::<u64>();
                 let count = qual.len();
                 Ok(sum as f64 / count as f64)
-            });
+            })
+        });
+    }
 
-            reg.add_method("tag", |lua, this: &Record, tag: String| {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("qpos", |_, this, ()| Ok(this.0.qpos.get()));
+
+        methods.add_method("n_proportion_3_prime", |_, this, n_bases: usize| {
+            this.with_record(|r| {
+                let seq = r.seq();
+                let mut count = 0;
+                let reverse = r.is_reverse();
+                for i in 0..n_bases {
+                    let base =
+                        seq[if reverse { i } else { seq.len() - 1 - i }].to_ascii_uppercase();
+                    if base == b'N' {
+                        count += 1;
+                    }
+                }
+                Ok(count as f64 / n_bases as f64)
+            })
+        });
+
+        methods.add_method("n_proportion_5_prime", |_, this, n_bases: usize| {
+            this.with_record(|r| {
+                let seq = r.seq();
+                let mut count = 0;
+                let reverse = r.is_reverse();
+                for i in 0..n_bases {
+                    let base =
+                        seq[if reverse { seq.len() - 1 - i } else { i }].to_ascii_uppercase();
+                    if base == b'N' {
+                        count += 1;
+                    }
+                }
+                Ok(count as f64 / n_bases as f64)
+            })
+        });
+
+        methods.add_method("tag", |lua, this, tag: String| {
+            this.with_record(|r| {
                 let tag = tag.as_bytes();
-                let aux = this.aux(tag).map_err(LuaError::external)?;
+                let aux = r.aux(tag).map_err(LuaError::external)?;
                 let lua_val: Value = match aux {
                     Aux::Char(v) => Value::String(lua.create_string(&[v])?),
                     Aux::I8(v) => Value::Number(v as f64),
@@ -233,42 +277,128 @@ impl<'a> LuaReadFilter<'a> {
                 };
                 Ok(Some(lua_val))
             })
-        })?;
-        Ok(Self { lua, filter_func })
+        });
     }
 }
 
-fn register_pile(lua: &Lua) -> mlua::Result<()> {
-    lua.register_userdata_type::<PileupPosition>(|reg| {
-        reg.add_field_method_get("depth", |_, this| Ok(this.depth));
-        reg.add_field_method_get("a", |_, this| Ok(this.a));
-        reg.add_field_method_get("c", |_, this| Ok(this.c));
-        reg.add_field_method_get("g", |_, this| Ok(this.g));
-        reg.add_field_method_get("t", |_, this| Ok(this.t));
-        reg.add_field_method_get("n", |_, this| Ok(this.n));
-        reg.add_field_method_get("fail", |_, this| Ok(this.fail));
-        reg.add_field_method_get("ins", |_, this| Ok(this.ins));
-        reg.add_field_method_get("del", |_, this| Ok(this.del));
-        reg.add_field_method_get("ref_skip", |_, this| Ok(this.ref_skip));
-        reg.add_field_method_get("pos", |_, this| Ok(this.pos));
-    })
+struct LuaReadFilter {
+    filter_func: Function,
+    read_slot: Arc<ReadSlot>,
+    read_ud: AnyUserData,
 }
 
-impl<'a> ReadFilter for LuaReadFilter<'a> {
+impl LuaReadFilter {
+    // Create a new LuaReadFilter instance with the given expression
+    fn new(expression: &str, lua: &Lua) -> Result<Self> {
+        lua.set_compiler(Compiler::new().set_optimization_level(2));
+        let wrapped = format!("return function(read)\n{}\nend", expression);
+        let filter_func: Function = lua.load(&wrapped).eval()?;
+        let read_slot = Arc::new(ReadSlot {
+            record: Cell::new(std::ptr::null()),
+            qpos: Cell::new(usize::MAX),
+        });
+        let read_ud = lua.create_userdata(LuaRead(Arc::clone(&read_slot)))?;
+        Ok(Self {
+            filter_func,
+            read_slot,
+            read_ud,
+        })
+    }
+}
+
+struct PileSlot {
+    pile: Cell<*const PileupPosition>,
+}
+
+// SAFETY: PileSlot is strictly confined to the single thread owning its Lua VM.
+// The raw pointer is only non-null during a synchronous pile expression call and
+// is always cleared by PileSlotGuard on return or unwind.
+unsafe impl Send for PileSlot {}
+unsafe impl Sync for PileSlot {}
+
+struct PileSlotGuard<'a>(&'a PileSlot);
+
+impl Drop for PileSlotGuard<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.pile.set(std::ptr::null());
+    }
+}
+
+#[derive(Clone)]
+struct LuaPile(Arc<PileSlot>);
+
+impl LuaPile {
+    #[inline(always)]
+    fn with_pile<T>(&self, f: impl FnOnce(&PileupPosition) -> mlua::Result<T>) -> mlua::Result<T> {
+        let ptr = self.0.pile.get();
+        if ptr.is_null() {
+            return Err(LuaError::RuntimeError(
+                "pile reference is no longer valid".to_string(),
+            ));
+        }
+        // SAFETY: ptr points to a valid &PileupPosition for the duration of the call.
+        f(unsafe { &*ptr })
+    }
+}
+
+impl UserData for LuaPile {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("depth", |_, this| this.with_pile(|p| Ok(p.depth)));
+        fields.add_field_method_get("a", |_, this| this.with_pile(|p| Ok(p.a)));
+        fields.add_field_method_get("c", |_, this| this.with_pile(|p| Ok(p.c)));
+        fields.add_field_method_get("g", |_, this| this.with_pile(|p| Ok(p.g)));
+        fields.add_field_method_get("t", |_, this| this.with_pile(|p| Ok(p.t)));
+        fields.add_field_method_get("n", |_, this| this.with_pile(|p| Ok(p.n)));
+        fields.add_field_method_get("fail", |_, this| this.with_pile(|p| Ok(p.fail)));
+        fields.add_field_method_get("ins", |_, this| this.with_pile(|p| Ok(p.ins)));
+        fields.add_field_method_get("del", |_, this| this.with_pile(|p| Ok(p.del)));
+        fields.add_field_method_get("ref_skip", |_, this| this.with_pile(|p| Ok(p.ref_skip)));
+        fields.add_field_method_get("pos", |_, this| this.with_pile(|p| Ok(p.pos)));
+    }
+}
+
+struct LuaPileFilter {
+    filter_func: Function,
+    pile_slot: Arc<PileSlot>,
+    pile_ud: AnyUserData,
+}
+
+impl LuaPileFilter {
+    fn new(expression: &str, lua: &Lua) -> Result<Self> {
+        lua.set_compiler(Compiler::new().set_optimization_level(2));
+        let wrapped = format!("return function(pile)\n{}\nend", expression);
+        let filter_func: Function = lua.load(&wrapped).eval()?;
+        let pile_slot = Arc::new(PileSlot {
+            pile: Cell::new(std::ptr::null()),
+        });
+        let pile_ud = lua.create_userdata(LuaPile(Arc::clone(&pile_slot)))?;
+        Ok(Self {
+            filter_func,
+            pile_slot,
+            pile_ud,
+        })
+    }
+
+    #[inline]
+    fn eval(&self, pile: &PileupPosition) -> mlua::Result<bool> {
+        self.pile_slot.pile.set(pile as *const PileupPosition);
+        let _guard = PileSlotGuard(&self.pile_slot);
+        self.filter_func.call::<bool>(&self.pile_ud)
+    }
+}
+
+impl ReadFilter for LuaReadFilter {
     /// Filter reads based user expression.
     #[inline]
     fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
-        let r = self.lua.scope(|scope| {
-            let globals = self.lua.globals();
-            let ud = scope.create_any_userdata_ref(read)?;
-            ud.set_named_user_value("qpos", alignment.unwrap().qpos().unwrap_or(usize::MAX))?;
+        self.read_slot.record.set(read as *const Record);
+        self.read_slot
+            .qpos
+            .set(alignment.and_then(|a| a.qpos()).unwrap_or(usize::MAX));
+        let _guard = ReadSlotGuard(&self.read_slot);
 
-            globals.set("read", ud).expect("error setting read");
-
-            self.filter_func.call::<bool>(())
-        });
-
-        match r {
+        match self.filter_func.call::<bool>(&self.read_ud) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error evaluating expression: {}", e);
@@ -305,16 +435,14 @@ impl RegionProcessor for BasicProcessor {
             Self::bed_to_intervals(&header, regions_bed, true).expect("BED file")
         });
 
-        let string_count = rf
-            .lua
+        let string_count = lua
             .create_function(|_, (haystack, needle): (String, String)| {
                 assert!(needle.len() == 1);
                 let needle = needle.chars().next().unwrap();
                 Ok(haystack.chars().filter(|c| *c == needle).count())
             })
             .expect("eror creating function");
-        rf.lua
-            .globals()
+        lua.globals()
             .set("string_count", string_count)
             .expect("error setting string_count");
 
@@ -424,10 +552,8 @@ fn main() -> Result<()> {
     );
 
     let pile_lua = Lua::new();
-    register_pile(&pile_lua)?;
-
-    let pile_expression: Option<Function> = if let Some(expression) = opts.pile_expression {
-        Some(pile_lua.load(expression.as_str()).into_function()?)
+    let pile_filter = if let Some(expression) = opts.pile_expression {
+        Some(LuaPileFilter::new(expression.as_str(), &pile_lua)?)
     } else {
         None
     };
@@ -441,15 +567,8 @@ fn main() -> Result<()> {
         .filter(|p| p.depth > 0)
         // filter on the pile expression
         .filter(|p| {
-            if let Some(pile_expression) = &pile_expression {
-                let r = pile_lua.scope(|scope| {
-                    let globals = pile_lua.globals();
-                    let ud = scope.create_any_userdata_ref(p)?;
-                    globals.set("pile", ud).expect("error setting pile");
-
-                    pile_expression.call::<bool>(())
-                });
-                match r {
+            if let Some(pile_filter) = &pile_filter {
+                match pile_filter.eval(p) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Error evaluating expression: {}", e);
@@ -542,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pileup_position() -> mlua::Result<()> {
+    fn test_pileup_position() -> Result<()> {
         let pileup_position = PileupPosition {
             depth: 10,
             a: 1,
@@ -559,28 +678,16 @@ mod tests {
         };
 
         let lua = Lua::new();
-        register_pile(&lua)?;
-        let globals = lua.globals();
         for (expected, expression) in [
-            (true, "pile.g > 3"),
+            (false, "pile.g > 3"),
             (true, "pile.a > 0"),
             (false, "pile.a > 10"),
             (false, "pile.ref_skip == 100"),
             (true, "pile.ref_skip == 9"),
         ] {
-            eprintln!("Testing expression: {}", expression);
-            lua.scope(|scope| {
-                let p = scope
-                    .create_any_userdata_ref(&pileup_position)
-                    .expect("error creating user data");
-                globals.set("pile", p)?;
-                let f = lua
-                    .load(&(String::from("return ") + expression))
-                    .into_function()?;
-                let result: bool = f.call(())?;
-                Ok(result == expected)
-            })
-            .expect("error evaluating expression");
+            let pf = LuaPileFilter::new(&(String::from("return ") + expression), &lua)?;
+            let result = pf.eval(&pileup_position)?;
+            assert_eq!(result, expected, "expression: {}", expression);
         }
         Ok(())
     }

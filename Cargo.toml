@@ -12,7 +12,7 @@ anyhow = "1.0.71"
 bio = "1.1.0"
 clap = {version="4.3.0", features=["derive", "help"]}
 mimalloc = "0.1.37"
-mlua = {version = "0.10.3", features=["luau", "send"]}
+mlua = {version = "0.10.3", features=["luau-jit", "send"]}
 perbase = {git = "https://github.com/brentp/perbase", rev="2b96a92"}
 #rust-htslib = {git = "https://github.com/brentp/rust-htslib", branch = "faidx-sl", features=["static"]}
 rust-htslib = {git = "https://github.com/brentp/rust-htslib", rev = "b130834", features=["static"]}
@@ -20,6 +20,7 @@ rust-lapper = "1.1.0"
 
 [profile.release]
 codegen-units=1
+lto = true
 
 [profile.dev]
 opt-level = 1
