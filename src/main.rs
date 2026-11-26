@@ -2,11 +2,17 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cached_faidx;
+mod expr;
 mod processor;
 
 use anyhow::Result;
 use cached_faidx::CachedFaidx;
 use clap::Parser;
+use expr::{
+    call_fast_bool, compile_lua_filter, eval_fast_pile_field, eval_fast_read_field,
+    is_read_only_expression, partition_read_only_clauses, try_compile_native_read_expr,
+    FastPileField, FastReadField, NativeExpr, FAST_PILE_FIELDS, FAST_READ_FIELDS,
+};
 use processor::{excluded, BasicProcessor};
 
 use mlua::prelude::*;
@@ -22,71 +28,126 @@ use rust_htslib::bam::{
     record::{Aux, Cigar, Record},
     Read,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-struct ReadSlot {
-    record: Cell<*const Record>,
-    qpos: Cell<usize>,
-}
+/// Fast non-cryptographic multiplicative hasher specialized for aligned `usize` pointer
+/// keys in `ReadCache`, avoiding `SipHash` overhead on every pileup alignment lookup.
+#[derive(Default)]
+struct PtrHasher(usize);
 
-// SAFETY: ReadSlot is strictly confined to the single thread owning its Lua VM.
-// The raw pointer is only non-null during a synchronous filter_read call and is
-// always cleared by ReadSlotGuard on return or unwind.
-unsafe impl Send for ReadSlot {}
-unsafe impl Sync for ReadSlot {}
-
-struct ReadSlotGuard<'a>(&'a ReadSlot);
-
-impl Drop for ReadSlotGuard<'_> {
+impl Hasher for PtrHasher {
     #[inline(always)]
-    fn drop(&mut self) {
-        self.0.record.set(std::ptr::null());
-        self.0.qpos.set(usize::MAX);
+    fn finish(&self) -> u64 {
+        self.0 as u64
+    }
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self
+                .0
+                .wrapping_mul(0x517cc1b727220a95)
+                .wrapping_add(b as usize);
+        }
+    }
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (i >> 3).wrapping_mul(0x517cc1b727220a95);
     }
 }
 
-#[derive(Clone)]
-struct LuaRead(Arc<ReadSlot>);
+/// Per-region active-read cache mapping `bam1_t.data` pointer -> `(read_pos, passed)`.
+/// Exists so read-level (position-independent) filters evaluate once per read (~150x fewer
+/// calls) rather than at every covered base; storing `read_pos` guards against htslib
+/// buffer reuse across excluded positions while `is_tail()` eviction keeps size O(depth).
+type ReadCache = HashMap<usize, (i64, bool), BuildHasherDefault<PtrHasher>>;
 
-impl LuaRead {
+/// Reusable thread-confined `Cell`-backed pointer slot that lets a single persistent Lua
+/// userdata (`LuaRead` or `LuaPile`) be rebound to each `&Record`/`&PileupPosition` in O(1),
+/// avoiding per-call `lua.scope` allocations, `named_user_value` table lookups, and GC churn.
+struct PtrSlot<T> {
+    ptr: Cell<*const T>,
+    qpos: Cell<usize>,
+}
+
+// SAFETY: PtrSlot is strictly confined to the single thread owning its Lua VM;
+// the raw pointer is only non-null during a synchronous filter call.
+unsafe impl<T> Send for PtrSlot<T> {}
+unsafe impl<T> Sync for PtrSlot<T> {}
+
+impl<T> PtrSlot<T> {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ptr: Cell::new(std::ptr::null()),
+            qpos: Cell::new(usize::MAX),
+        })
+    }
+
     #[inline(always)]
-    fn with_record<T>(&self, f: impl FnOnce(&Record) -> mlua::Result<T>) -> mlua::Result<T> {
-        let ptr = self.0.record.get();
+    fn bind(&self, val: &T, qpos: usize) -> PtrSlotGuard<'_, T> {
+        self.ptr.set(val as *const T);
+        self.qpos.set(qpos);
+        PtrSlotGuard(self)
+    }
+
+    #[inline(always)]
+    fn with_ref<R>(&self, f: impl FnOnce(&T) -> mlua::Result<R>) -> mlua::Result<R> {
+        let ptr = self.ptr.get();
         if ptr.is_null() {
             return Err(LuaError::RuntimeError(
-                "read reference is no longer valid".to_string(),
+                "userdata reference is no longer valid".to_string(),
             ));
         }
-        // SAFETY: ptr points to a valid &Record for the duration of filter_read.
+        // SAFETY: ptr points to a live &T for the duration of the bound guard.
         f(unsafe { &*ptr })
     }
 }
 
+/// RAII guard returned by `PtrSlot::bind` that clears the raw pointer to null on drop
+/// (including unwinds), preventing dangling-pointer access if a Lua script stashes `read`
+/// or `pile` past the lifetime of a single filter call.
+struct PtrSlotGuard<'a, T>(&'a PtrSlot<T>);
+
+impl<T> Drop for PtrSlotGuard<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.ptr.set(std::ptr::null());
+        self.0.qpos.set(usize::MAX);
+    }
+}
+
+/// Persistent `mlua::UserData` handle exposing BAM `Record` fields and methods (`read.*`,
+/// `read:tag(...)`, etc.) to Lua through a `PtrSlot<Record>` whenever an expression accesses
+/// attributes not handled by direct fast-field parameters or `NativeExpr`.
+#[derive(Clone)]
+struct LuaRead(Arc<PtrSlot<Record>>);
+
 impl UserData for LuaRead {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("mapping_quality", |_, this| {
-            this.with_record(|r| Ok(r.mapq()))
+            this.0.with_ref(|r| Ok(r.mapq()))
         });
-        fields.add_field_method_get("flags", |_, this| this.with_record(|r| Ok(r.flags())));
-        fields.add_field_method_get("tid", |_, this| this.with_record(|r| Ok(r.tid())));
-        fields.add_field_method_get("start", |_, this| this.with_record(|r| Ok(r.pos())));
+        fields.add_field_method_get("flags", |_, this| this.0.with_ref(|r| Ok(r.flags())));
+        fields.add_field_method_get("tid", |_, this| this.0.with_ref(|r| Ok(r.tid())));
+        fields.add_field_method_get("start", |_, this| this.0.with_ref(|r| Ok(r.pos())));
         fields.add_field_method_get("stop", |_, this| {
-            this.with_record(|r| Ok(r.cigar().end_pos()))
+            this.0.with_ref(|r| Ok(r.cigar().end_pos()))
         });
-        fields.add_field_method_get("length", |_, this| this.with_record(|r| Ok(r.seq_len())));
+        fields.add_field_method_get("length", |_, this| this.0.with_ref(|r| Ok(r.seq_len())));
         fields.add_field_method_get("insert_size", |_, this| {
-            this.with_record(|r| Ok(r.insert_size()))
+            this.0.with_ref(|r| Ok(r.insert_size()))
         });
         fields.add_field_method_get("qname", |_, this| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let q = r.qname();
                 Ok(std::str::from_utf8(q).unwrap_or("").to_string())
             })
         });
         fields.add_field_method_get("sequence", |_, this| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let seq = r.seq();
                 Ok(std::str::from_utf8(&seq.as_bytes())
                     .unwrap_or("")
@@ -98,14 +159,14 @@ impl UserData for LuaRead {
             if qpos == usize::MAX {
                 return Ok(-1);
             }
-            this.with_record(|r| Ok(r.qual()[qpos] as i32))
+            this.0.with_ref(|r| Ok(r.qual()[qpos] as i32))
         });
         fields.add_field_method_get("distance_from_5prime", |_, this| {
             let qpos = this.0.qpos.get();
             if qpos == usize::MAX {
                 return Ok(-1);
             }
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 if r.is_reverse() {
                     Ok(r.seq_len() as i32 - qpos as i32)
                 } else {
@@ -118,7 +179,7 @@ impl UserData for LuaRead {
             if qpos == usize::MAX {
                 return Ok(usize::MAX);
             }
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 if r.is_reverse() {
                     Ok(qpos)
                 } else {
@@ -127,22 +188,17 @@ impl UserData for LuaRead {
             })
         });
         fields.add_field_method_get("indel_count", |_, this| {
-            this.with_record(|r| {
-                let cigar = r.cigar();
-                let mut count = 0;
-                for op in cigar.iter() {
-                    match op {
-                        Cigar::Ins(_) | Cigar::Del(_) => {
-                            count += 1;
-                        }
-                        _ => {}
-                    }
-                }
+            this.0.with_ref(|r| {
+                let count = r
+                    .cigar()
+                    .iter()
+                    .filter(|op| matches!(op, Cigar::Ins(_) | Cigar::Del(_)))
+                    .count();
                 Ok(count)
             })
         });
         fields.add_field_method_get("soft_clips_3_prime", |_, this| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let cigar = r.cigar();
                 if r.is_reverse() {
                     Ok(cigar.leading_softclips())
@@ -152,7 +208,7 @@ impl UserData for LuaRead {
             })
         });
         fields.add_field_method_get("soft_clips_5_prime", |_, this| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let cigar = r.cigar();
                 if r.is_reverse() {
                     Ok(cigar.trailing_softclips())
@@ -162,11 +218,10 @@ impl UserData for LuaRead {
             })
         });
         fields.add_field_method_get("average_base_quality", |_, this| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let qual = r.qual();
                 let sum = qual.iter().map(|q| *q as u64).sum::<u64>();
-                let count = qual.len();
-                Ok(sum as f64 / count as f64)
+                Ok(sum as f64 / qual.len() as f64)
             })
         });
     }
@@ -175,7 +230,7 @@ impl UserData for LuaRead {
         methods.add_method("qpos", |_, this, ()| Ok(this.0.qpos.get()));
 
         methods.add_method("n_proportion_3_prime", |_, this, n_bases: usize| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let seq = r.seq();
                 let mut count = 0;
                 let reverse = r.is_reverse();
@@ -191,7 +246,7 @@ impl UserData for LuaRead {
         });
 
         methods.add_method("n_proportion_5_prime", |_, this, n_bases: usize| {
-            this.with_record(|r| {
+            this.0.with_ref(|r| {
                 let seq = r.seq();
                 let mut count = 0;
                 let reverse = r.is_reverse();
@@ -207,203 +262,280 @@ impl UserData for LuaRead {
         });
 
         methods.add_method("tag", |lua, this, tag: String| {
-            this.with_record(|r| {
-                let tag = tag.as_bytes();
-                let aux = r.aux(tag).map_err(LuaError::external)?;
-                let lua_val: Value = match aux {
-                    Aux::Char(v) => Value::String(lua.create_string(&[v])?),
-                    Aux::I8(v) => Value::Number(v as f64),
-                    Aux::U8(v) => Value::Number(v as f64),
-                    Aux::I16(v) => Value::Number(v as f64),
-                    Aux::U16(v) => Value::Number(v as f64),
-                    Aux::I32(v) => Value::Number(v as f64),
-                    Aux::U32(v) => Value::Number(v as f64),
-                    Aux::Float(v) => Value::Number(v as f64),
-                    Aux::Double(v) => Value::Number(v as f64),
-                    Aux::String(v) => Value::String(lua.create_string(&v)?),
-                    Aux::ArrayFloat(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(f32::NAN) as f32);
+            this.0.with_ref(|r| {
+                let aux = r.aux(tag.as_bytes()).map_err(LuaError::external)?;
+                let lua_val: Value =
+                    match aux {
+                        Aux::Char(v) => Value::String(lua.create_string(&[v])?),
+                        Aux::I8(v) => Value::Number(v as f64),
+                        Aux::U8(v) => Value::Number(v as f64),
+                        Aux::I16(v) => Value::Number(v as f64),
+                        Aux::U16(v) => Value::Number(v as f64),
+                        Aux::I32(v) => Value::Number(v as f64),
+                        Aux::U32(v) => Value::Number(v as f64),
+                        Aux::Float(v) => Value::Number(v as f64),
+                        Aux::Double(v) => Value::Number(v as f64),
+                        Aux::String(v) => Value::String(lua.create_string(v)?),
+                        Aux::ArrayFloat(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(f32::NAN)),
+                        )?),
+                        Aux::ArrayI32(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(i32::MIN)),
+                        )?),
+                        Aux::ArrayI8(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(i8::MIN)),
+                        )?),
+                        Aux::ArrayU8(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(u8::MIN)),
+                        )?),
+                        Aux::ArrayU16(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(u16::MIN)),
+                        )?),
+                        Aux::ArrayU32(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(u32::MIN)),
+                        )?),
+                        Aux::ArrayI16(v) => Value::Table(lua.create_sequence_from(
+                            (0..v.len()).map(|i| v.get(i).unwrap_or(i16::MIN)),
+                        )?),
+                        Aux::HexByteArray(v) => {
+                            let lstr = String::from_utf8_lossy(v.as_bytes());
+                            Value::String(lua.create_string(lstr.as_ref())?)
                         }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayI32(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(i32::MIN) as i32);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayI8(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(i8::MIN) as i8);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayU8(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(u8::MIN) as u8);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayU16(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(u16::MIN) as u16);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayU32(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(u32::MIN) as u32);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::ArrayI16(v) => {
-                        let mut arr = Vec::new();
-                        for i in 0..v.len() {
-                            arr.push(v.get(i).unwrap_or(i16::MIN) as i16);
-                        }
-                        Value::Table(lua.create_sequence_from(arr)?)
-                    }
-                    Aux::HexByteArray(v) => {
-                        let lstr = String::from_utf8_lossy(v.as_bytes()).to_string();
-                        Value::String(lua.create_string(&lstr)?)
-                    }
-                };
+                    };
                 Ok(Some(lua_val))
             })
         });
     }
 }
 
+/// A compiled read-filter expression backed by either a pure-Rust `NativeExpr` or a
+/// compiled Luau `Function` with extracted `FastReadField` parameters. Exists so callers
+/// transparently get native Rust speed for common predicates and full Luau generality for
+/// everything else.
+enum CompiledReadExpr {
+    Native(NativeExpr),
+    Lua {
+        func: Function,
+        fast_fields: Vec<FastReadField>,
+        needs_userdata: bool,
+    },
+}
+
+impl CompiledReadExpr {
+    fn compile(expression: &str, lua: &Lua) -> Result<Self> {
+        if let Some(native) = try_compile_native_read_expr(expression) {
+            return Ok(CompiledReadExpr::Native(native));
+        }
+        let (func, fast_fields, needs_userdata) =
+            compile_lua_filter(expression, "read", FAST_READ_FIELDS, lua)?;
+        Ok(CompiledReadExpr::Lua {
+            func,
+            fast_fields,
+            needs_userdata,
+        })
+    }
+
+    #[inline]
+    fn eval(
+        &self,
+        read: &Record,
+        qpos: usize,
+        read_slot: &PtrSlot<Record>,
+        read_ud: &AnyUserData,
+    ) -> bool {
+        match self {
+            CompiledReadExpr::Native(expr) => expr.eval(read, qpos),
+            CompiledReadExpr::Lua {
+                func,
+                fast_fields,
+                needs_userdata,
+            } => {
+                let mut vals = [0.0f64; 9];
+                for (idx, &field) in fast_fields.iter().enumerate() {
+                    vals[idx] = eval_fast_read_field(field, read, qpos);
+                }
+                let res = if *needs_userdata {
+                    let _guard = read_slot.bind(read, qpos);
+                    call_fast_bool(func, Some(read_ud), &vals, fast_fields.len())
+                } else {
+                    call_fast_bool(func, None, &vals, fast_fields.len())
+                };
+                match res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error evaluating expression: {}", e);
+                        false
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `perbase::ReadFilter` implementation that evaluates the user's Lua read expression
+/// using three fast paths: whole-expression native Rust evaluation, per-read caching of
+/// read-only expressions (or hoisted top-level `and`-clauses), and per-base evaluation
+/// with direct stack-passed arguments and a persistent `LuaRead` userdata.
 struct LuaReadFilter {
-    filter_func: Function,
-    read_slot: Arc<ReadSlot>,
+    read_only_filter: Option<CompiledReadExpr>,
+    base_filter: Option<CompiledReadExpr>,
+    read_slot: Arc<PtrSlot<Record>>,
     read_ud: AnyUserData,
+    read_cache: RefCell<ReadCache>,
 }
 
 impl LuaReadFilter {
-    // Create a new LuaReadFilter instance with the given expression
     fn new(expression: &str, lua: &Lua) -> Result<Self> {
         lua.set_compiler(Compiler::new().set_optimization_level(2));
-        let wrapped = format!("return function(read)\n{}\nend", expression);
-        let filter_func: Function = lua.load(&wrapped).eval()?;
-        let read_slot = Arc::new(ReadSlot {
-            record: Cell::new(std::ptr::null()),
-            qpos: Cell::new(usize::MAX),
-        });
+
+        // If the entire expression compiles to native Rust, evaluate directly with zero
+        // Lua calls and zero HashMap cache overhead.
+        let (read_only_filter, base_filter) =
+            if let Some(native) = try_compile_native_read_expr(expression) {
+                (None, Some(CompiledReadExpr::Native(native)))
+            } else if is_read_only_expression(expression) {
+                (Some(CompiledReadExpr::compile(expression, lua)?), None)
+            } else if let Some((read_only, per_base)) = partition_read_only_clauses(expression) {
+                let compile_and = |clauses: Vec<&str>| {
+                    let joined = clauses
+                        .iter()
+                        .map(|c| format!("({})", c))
+                        .collect::<Vec<_>>()
+                        .join(" and ");
+                    CompiledReadExpr::compile(&format!("return {}", joined), lua)
+                };
+                (Some(compile_and(read_only)?), Some(compile_and(per_base)?))
+            } else {
+                (None, Some(CompiledReadExpr::compile(expression, lua)?))
+            };
+
+        let read_slot = PtrSlot::new();
         let read_ud = lua.create_userdata(LuaRead(Arc::clone(&read_slot)))?;
         Ok(Self {
-            filter_func,
+            read_only_filter,
+            base_filter,
             read_slot,
             read_ud,
+            read_cache: RefCell::new(ReadCache::default()),
         })
     }
-}
 
-struct PileSlot {
-    pile: Cell<*const PileupPosition>,
-}
-
-// SAFETY: PileSlot is strictly confined to the single thread owning its Lua VM.
-// The raw pointer is only non-null during a synchronous pile expression call and
-// is always cleared by PileSlotGuard on return or unwind.
-unsafe impl Send for PileSlot {}
-unsafe impl Sync for PileSlot {}
-
-struct PileSlotGuard<'a>(&'a PileSlot);
-
-impl Drop for PileSlotGuard<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        self.0.pile.set(std::ptr::null());
-    }
-}
-
-#[derive(Clone)]
-struct LuaPile(Arc<PileSlot>);
-
-impl LuaPile {
-    #[inline(always)]
-    fn with_pile<T>(&self, f: impl FnOnce(&PileupPosition) -> mlua::Result<T>) -> mlua::Result<T> {
-        let ptr = self.0.pile.get();
-        if ptr.is_null() {
-            return Err(LuaError::RuntimeError(
-                "pile reference is no longer valid".to_string(),
-            ));
+    #[inline]
+    fn eval_read_only(
+        &self,
+        expr: &CompiledReadExpr,
+        read: &Record,
+        alignment: Option<&Alignment>,
+    ) -> bool {
+        let Some(aln) = alignment else {
+            return expr.eval(read, usize::MAX, &self.read_slot, &self.read_ud);
+        };
+        let key = read.inner().data as usize;
+        let pos = read.pos();
+        let is_tail = aln.is_tail();
+        if !aln.is_head() {
+            let mut cache = self.read_cache.borrow_mut();
+            if let Some(&(cached_pos, cached_res)) = cache.get(&key) {
+                if cached_pos == pos {
+                    if is_tail {
+                        cache.remove(&key);
+                    }
+                    return cached_res;
+                }
+            }
         }
-        // SAFETY: ptr points to a valid &PileupPosition for the duration of the call.
-        f(unsafe { &*ptr })
+        let res = expr.eval(read, usize::MAX, &self.read_slot, &self.read_ud);
+        let mut cache = self.read_cache.borrow_mut();
+        if is_tail {
+            cache.remove(&key);
+        } else {
+            cache.insert(key, (pos, res));
+        }
+        res
     }
 }
+
+impl ReadFilter for LuaReadFilter {
+    #[inline]
+    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
+        if let Some(ro) = &self.read_only_filter {
+            if !self.eval_read_only(ro, read, alignment) {
+                return false;
+            }
+        }
+        if let Some(base) = &self.base_filter {
+            let qpos = alignment.and_then(|a| a.qpos()).unwrap_or(usize::MAX);
+            base.eval(read, qpos, &self.read_slot, &self.read_ud)
+        } else {
+            true
+        }
+    }
+}
+
+/// Persistent `mlua::UserData` handle exposing `PileupPosition` fields (`pile.*`) to Lua
+/// through a `PtrSlot<PileupPosition>`, used as a fallback if `--pile-expression` references
+/// `pile` in a way that cannot be rewritten to direct primitive parameters.
+#[derive(Clone)]
+struct LuaPile(Arc<PtrSlot<PileupPosition>>);
 
 impl UserData for LuaPile {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("depth", |_, this| this.with_pile(|p| Ok(p.depth)));
-        fields.add_field_method_get("a", |_, this| this.with_pile(|p| Ok(p.a)));
-        fields.add_field_method_get("c", |_, this| this.with_pile(|p| Ok(p.c)));
-        fields.add_field_method_get("g", |_, this| this.with_pile(|p| Ok(p.g)));
-        fields.add_field_method_get("t", |_, this| this.with_pile(|p| Ok(p.t)));
-        fields.add_field_method_get("n", |_, this| this.with_pile(|p| Ok(p.n)));
-        fields.add_field_method_get("fail", |_, this| this.with_pile(|p| Ok(p.fail)));
-        fields.add_field_method_get("ins", |_, this| this.with_pile(|p| Ok(p.ins)));
-        fields.add_field_method_get("del", |_, this| this.with_pile(|p| Ok(p.del)));
-        fields.add_field_method_get("ref_skip", |_, this| this.with_pile(|p| Ok(p.ref_skip)));
-        fields.add_field_method_get("pos", |_, this| this.with_pile(|p| Ok(p.pos)));
+        fields.add_field_method_get("depth", |_, this| this.0.with_ref(|p| Ok(p.depth)));
+        fields.add_field_method_get("a", |_, this| this.0.with_ref(|p| Ok(p.a)));
+        fields.add_field_method_get("c", |_, this| this.0.with_ref(|p| Ok(p.c)));
+        fields.add_field_method_get("g", |_, this| this.0.with_ref(|p| Ok(p.g)));
+        fields.add_field_method_get("t", |_, this| this.0.with_ref(|p| Ok(p.t)));
+        fields.add_field_method_get("n", |_, this| this.0.with_ref(|p| Ok(p.n)));
+        fields.add_field_method_get("fail", |_, this| this.0.with_ref(|p| Ok(p.fail)));
+        fields.add_field_method_get("ins", |_, this| this.0.with_ref(|p| Ok(p.ins)));
+        fields.add_field_method_get("del", |_, this| this.0.with_ref(|p| Ok(p.del)));
+        fields.add_field_method_get("ref_skip", |_, this| this.0.with_ref(|p| Ok(p.ref_skip)));
+        fields.add_field_method_get("pos", |_, this| this.0.with_ref(|p| Ok(p.pos)));
     }
 }
 
+/// Compiled `--pile-expression` filter that rewrites `pile.<field>` accesses to stack-passed
+/// `f64` parameters and reuses a single persistent `LuaPile` userdata across pileup columns.
 struct LuaPileFilter {
     filter_func: Function,
-    pile_slot: Arc<PileSlot>,
+    pile_slot: Arc<PtrSlot<PileupPosition>>,
     pile_ud: AnyUserData,
+    fast_fields: Vec<FastPileField>,
+    needs_userdata: bool,
 }
 
 impl LuaPileFilter {
     fn new(expression: &str, lua: &Lua) -> Result<Self> {
         lua.set_compiler(Compiler::new().set_optimization_level(2));
-        let wrapped = format!("return function(pile)\n{}\nend", expression);
-        let filter_func: Function = lua.load(&wrapped).eval()?;
-        let pile_slot = Arc::new(PileSlot {
-            pile: Cell::new(std::ptr::null()),
-        });
+        let (filter_func, fast_fields, needs_userdata) =
+            compile_lua_filter(expression, "pile", FAST_PILE_FIELDS, lua)?;
+        let pile_slot = PtrSlot::new();
         let pile_ud = lua.create_userdata(LuaPile(Arc::clone(&pile_slot)))?;
         Ok(Self {
             filter_func,
             pile_slot,
             pile_ud,
+            fast_fields,
+            needs_userdata,
         })
     }
 
     #[inline]
     fn eval(&self, pile: &PileupPosition) -> mlua::Result<bool> {
-        self.pile_slot.pile.set(pile as *const PileupPosition);
-        let _guard = PileSlotGuard(&self.pile_slot);
-        self.filter_func.call::<bool>(&self.pile_ud)
-    }
-}
-
-impl ReadFilter for LuaReadFilter {
-    /// Filter reads based user expression.
-    #[inline]
-    fn filter_read(&self, read: &Record, alignment: Option<&Alignment>) -> bool {
-        self.read_slot.record.set(read as *const Record);
-        self.read_slot
-            .qpos
-            .set(alignment.and_then(|a| a.qpos()).unwrap_or(usize::MAX));
-        let _guard = ReadSlotGuard(&self.read_slot);
-
-        match self.filter_func.call::<bool>(&self.read_ud) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Error evaluating expression: {}", e);
-                false
-            }
+        let mut vals = [0.0f64; 11];
+        for (idx, &field) in self.fast_fields.iter().enumerate() {
+            vals[idx] = eval_fast_pile_field(field, pile);
+        }
+        if self.needs_userdata {
+            let _guard = self.pile_slot.bind(pile, usize::MAX);
+            call_fast_bool(
+                &self.filter_func,
+                Some(&self.pile_ud),
+                &vals,
+                self.fast_fields.len(),
+            )
+        } else {
+            call_fast_bool(&self.filter_func, None, &vals, self.fast_fields.len())
         }
     }
 }
@@ -424,17 +556,6 @@ impl RegionProcessor for BasicProcessor {
         let header = reader.header().to_owned();
         let lua = Lua::new();
 
-        let rf = LuaReadFilter::new(&self.expression, &lua).unwrap_or_else(|_| {
-            panic!(
-                "error creating lua read filter with expression {}",
-                &self.expression
-            )
-        });
-
-        let exclude_intervals = self.exclude_regions.as_ref().map(|regions_bed| {
-            Self::bed_to_intervals(&header, regions_bed, true).expect("BED file")
-        });
-
         let string_count = lua
             .create_function(|_, (haystack, needle): (String, String)| {
                 assert!(needle.len() == 1);
@@ -445,6 +566,17 @@ impl RegionProcessor for BasicProcessor {
         lua.globals()
             .set("string_count", string_count)
             .expect("error setting string_count");
+
+        let rf = LuaReadFilter::new(&self.expression, &lua).unwrap_or_else(|_| {
+            panic!(
+                "error creating lua read filter with expression {}",
+                &self.expression
+            )
+        });
+
+        let exclude_intervals = self.exclude_regions.as_ref().map(|regions_bed| {
+            Self::bed_to_intervals(&header, regions_bed, true).expect("BED file")
+        });
 
         // fetch the region
         reader.fetch((tid, start, stop)).expect("Fetched ROI");
@@ -486,6 +618,9 @@ impl RegionProcessor for BasicProcessor {
     }
 }
 
+/// Command-line arguments parsed by `clap` specifying the input BAM/CRAM, Lua read and
+/// optional pileup filter expressions, thread count, max depth, reference FASTA, BED
+/// include/exclude regions, and mate-overlap deduplication.
 #[derive(Parser, Default, Debug)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true)]
 struct Args {
@@ -580,7 +715,6 @@ fn main() -> Result<()> {
             }
         })
         .for_each(|p: PileupPosition| {
-            //p:PileupPosition { ref_seq: "chr2", pos: 196, ref_base: None, depth: 1, a: 1, c: 0, g: 0, t: 0, n: 0, ins: 0, del: 0, ref_skip: 0, fail: 1, near_max_depth: false }
             println!(
                 "{chrom}\t{pos}\t{ref_base}\t{depth}\t{a}\t{c}\t{g}\t{t}\t{n}",
                 chrom = p.ref_seq,
@@ -611,7 +745,6 @@ mod tests {
 
     #[test]
     fn test_read_bq() -> Result<()> {
-        // Create a header with chr1
         let mut header = Header::new();
         let mut sq = HeaderRecord::new(b"SQ");
         sq.push_tag(b"SN", "chr1");
@@ -619,14 +752,12 @@ mod tests {
         header.push_record(&sq);
         let header_view = HeaderView::from_header(&header);
 
-        // Create a test BAM record using SAM format
         let record = Record::from_sam(
             &header_view,
-            b"test_read\t0\tchr1\t100\t30\t4M\t*\t0\t0\tACGT\t&&&&\tRG:Z:test", // Use standard ASCII for qual
+            b"test_read\t0\tchr1\t100\t30\t4M\t*\t0\t0\tACGT\t&&&&\tRG:Z:test",
         )
         .expect("Failed to create record from SAM");
 
-        // Write record to a temporary BAM file
         let tmp = NamedTempFile::new()?;
         let path = tmp.path();
         {
@@ -635,13 +766,10 @@ mod tests {
         }
         bam::index::build(path, None, bam::index::Type::Bai, 1)?;
 
-        // Create pileup
         let mut reader = IndexedReader::from_path(path)?;
-        reader.fetch(("chr1", 100, 101))?; // Fetch the position of the record
+        reader.fetch(("chr1", 100, 101))?;
         let mut pileups = reader.pileup();
         let pileup: Pileup = pileups.next().unwrap().expect("Failed to get pileup");
-
-        // Get the first alignment from the pileup
         let alignment = pileup
             .alignments()
             .next()
@@ -651,11 +779,19 @@ mod tests {
         let rf = LuaReadFilter::new(
             "return read.bq > 0 and read.distance_from_5prime == 0 and read.distance_from_3prime > 0",
             &lua,
-        )?; // Example expression
+        )?;
 
-        // Test the bq functionality using the alignment from the pileup
         let result = rf.filter_read(&alignment.record(), Some(&alignment));
         assert!(result);
+
+        // Split into a cached read-level clause and a per-base clause; the trailing
+        // comments must not break compilation of the re-joined clauses.
+        let rf = LuaReadFilter::new(
+            "return read:tag('RG') == 'test' -- rg\n and read.bq > 0 -- bq\n",
+            &lua,
+        )?;
+        assert!(rf.read_only_filter.is_some() && rf.base_filter.is_some());
+        assert!(rf.filter_read(&alignment.record(), Some(&alignment)));
 
         Ok(())
     }

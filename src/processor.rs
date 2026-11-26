@@ -6,6 +6,9 @@ use rust_lapper::{Interval, Lapper};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// `perbase::RegionProcessor` configuration shared across Rayon worker threads. Holds the
+/// input paths and filter settings each worker needs to fetch a genomic interval, run
+/// pileup with `LuaReadFilter`, exclude blacklisted positions, and attach reference bases.
 pub(crate) struct BasicProcessor {
     // An indexed bamfile to query for the region we were passed
     pub(crate) bamfile: PathBuf,
